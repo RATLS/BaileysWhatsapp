@@ -1,5 +1,5 @@
 const redis = require("../redis")
-const { startSenderLoop } = require("../../worker/socketManager")
+const { wakeSender } = require("../senderWakeup")
 
 module.exports = async function (fastify) {
   fastify.post("/messages/send", async (req, res) => {
@@ -24,7 +24,7 @@ module.exports = async function (fastify) {
       })
     )
 
-    startSenderLoop(clientId)
+    wakeSender(clientId)
 
     return { ok: true, queued: true }
   })
