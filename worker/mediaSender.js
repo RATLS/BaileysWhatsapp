@@ -3,8 +3,11 @@ const axios = require("axios")
 async function sendMessageWithMedia(sock, jid, payload) {
   const { msg, files = [] } = payload
 
+  const hasText = typeof msg === "string" && msg.trim().length > 0
+
   // CASE 1: Only text
   if (!files.length) {
+    if (!hasText) return // 🔒 nothing to send
     await sock.sendMessage(jid, { text: msg })
     return
   }
@@ -12,14 +15,16 @@ async function sendMessageWithMedia(sock, jid, payload) {
   // CASE 2: Single media (caption)
   if (files.length === 1) {
     const file = files[0]
-
     const media = await fetchMedia(file)
 
-    await sock.sendMessage(jid, {
-      ...media,
-      caption: msg
-    })
+    const message = { ...media }
 
+    // ✅ caption only if valid
+    if (hasText) {
+      message.caption = msg
+    }
+
+    await sock.sendMessage(jid, message)
     return
   }
 
@@ -29,8 +34,8 @@ async function sendMessageWithMedia(sock, jid, payload) {
     await sock.sendMessage(jid, media)
   }
 
-  // Send text separately at the end
-  if (msg) {
+  // Send text separately at the end (ONLY if valid)
+  if (hasText) {
     await sock.sendMessage(jid, { text: msg })
   }
 }
