@@ -75,9 +75,9 @@ sock.ev.on("connection.update", async (update) => {
       state: "CONNECTED"
     })
 
-    setTimeout(() => {
-      startSenderLoop(clientId)
-    }, 2000)
+    // setTimeout(() => {
+    //   startSenderLoop(clientId)
+    // }, 2000)
 
     connectedClients.add(clientId)
     console.log(`✅ ${clientId} connected`)
