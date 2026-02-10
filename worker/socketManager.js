@@ -171,6 +171,8 @@ async function startSenderLoop(clientId) {
         ? phone
         : `91${phone}@s.whatsapp.net`
 
+      console.log('JID is: ', jid)
+
       console.log(`📤 Sending via ${clientId} → ${payload.phoneNumber}`)
 
       await sendMessageWithMedia(sock, jid, payload)
