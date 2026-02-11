@@ -35,27 +35,27 @@ function buildMediaMessage(file, caption) {
 
   if (mimetype.startsWith("image/")) {
     return {
-      image: { url: file_url },  // ✅ FIX
+      image: { url: file_url },  // ✅ FI
       ...(caption && { caption })
     }
   }
 
   if (mimetype.startsWith("video/")) {
     return {
-      video: { url: file_url },  // ✅ FIX
+      video: { url: file_url },
       ...(caption && { caption })
     }
   }
 
   if (mimetype.startsWith("audio/")) {
     return {
-      audio: { url: file_url },  // ✅ FIX
+      audio: { url: file_url },
       mimetype
     }
   }
 
   return {
-    document: { url: file_url }, // ✅ FIX
+    document: { url: file_url }, 
     mimetype,
     fileName: filename || "file"
   }
