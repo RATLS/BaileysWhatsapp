@@ -35,11 +35,11 @@ async function sendMessageWithMedia(sock, jid, payload) {
 }
 
 function buildMediaMessage(file, caption) {
-  const { file_url, mimetype, filename } = file
+  const { file_url, mimeType : mimetype , filename } = file
 
   if (mimetype.startsWith("image/")) {
     return {
-      image: { url: file_url },  // ✅ FI
+      image: { url: file_url },
       ...(caption && { caption })
     }
   }
@@ -59,7 +59,7 @@ function buildMediaMessage(file, caption) {
   }
 
   return {
-    document: { url: file_url }, 
+    document: { url: file_url },
     mimetype,
     fileName: filename || "file"
   }
