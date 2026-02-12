@@ -2,6 +2,7 @@ const clients = new Map()
 // clientId -> Set<ws>
 
 function register(clientId, ws) {
+  console.log("REGISTERED WS FOR:", clientId)
   if (!clients.has(clientId)) {
     clients.set(clientId, new Set())
   }
@@ -18,8 +19,10 @@ function register(clientId, ws) {
 
 function broadcast(clientId, payload) {
   const sockets = clients.get(clientId)
-  if (!sockets) return
 
+  console.log("BROADCAST to", clientId, "sockets:", sockets?.size)
+
+  if (!sockets) return
   const msg = JSON.stringify(payload)
 
   for (const ws of sockets) {
