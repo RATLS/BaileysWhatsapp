@@ -49,98 +49,105 @@ async function initClient(clientId) {
 
     sock.ev.on("creds.update", saveCreds)
 
-sock.ev.on("connection.update", async (update) => {
-  console.log(`📡 [${clientId}] connection.update`, JSON.stringify(update))
+  sock.ev.on("connection.update", async (update) => {
+    console.log(`📡 [${clientId}] connection.update`, JSON.stringify(update))
 
-  const { connection, qr, lastDisconnect } = update
+    const { connection, qr, lastDisconnect } = update
 
-  if (qr) {
-      await setClientState(clientId, STATES.QR_REQUIRED)
-      publishEvent({
-        type: "qr",
-        clientId,
-        qr
-      })
-    console.log(`\n📲 Scan QR for ${clientId}\n`)
-    require("qrcode-terminal").generate(qr, { small: true })
-    bootingClients.delete(clientId)
-    return
-  }
-
-  if (connection === "open") {
-    await setClientState(clientId, STATES.CONNECTED)
-    publishEvent({
-      type: "status",
-      clientId,
-      state: "CONNECTED"
-    })
-
-    setTimeout(() => {
-      startSenderLoop(clientId)
-    }, 2000)
-
-    connectedClients.add(clientId)
-    console.log(`✅ ${clientId} connected`)
-
-    bootingClients.delete(clientId)
-
-    // startSenderLoop(clientId)
-
-    return
-  }
-
-  if (connection === "close") {
-    connectedClients.delete(clientId)
-    const statusCode =
-      lastDisconnect?.error?.output?.statusCode ??
-      lastDisconnect?.error?.output?.payload?.statusCode
-
-    if (statusCode === undefined && bootingClients.has(clientId)) {
-      console.log(`🟡 ${clientId} waiting for QR...`)
+    if (qr) {
+        await setClientState(clientId, STATES.QR_REQUIRED)
+        publishEvent({
+          type: "qr",
+          clientId,
+          qr
+        })
+      console.log(`\n📲 Scan QR for ${clientId}\n`)
+      require("qrcode-terminal").generate(qr, { small: true })
+      bootingClients.delete(clientId)
       return
     }
 
-    console.log(`❌ ${clientId} disconnected (${statusCode})`)
-
-    // 🚪 Logged out / Unauthorized
-    if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-      await setClientState(clientId, STATES.LOGGED_OUT)
-
+    if (connection === "open") {
+      await setClientState(clientId, STATES.CONNECTED)
       publishEvent({
         type: "status",
         clientId,
-        state: "LOGGED_OUT"
+        state: "CONNECTED"
       })
 
-      sockets.delete(clientId)
-      clearSession(clientId)
-
-      console.log(`📲 ${clientId} requires new QR`)
-
-      // 🔥 Auto re-init to generate new QR
       setTimeout(() => {
-        console.log(`🔄 Reinitializing ${clientId} for new QR`)
-        initClient(clientId)
-      }, 1000)
+        startSenderLoop(clientId)
+      }, 2000)
+
+      connectedClients.add(clientId)
+      console.log(`✅ ${clientId} connected`)
+
+      bootingClients.delete(clientId)
+
+      // startSenderLoop(clientId)
 
       return
     }
 
-    // 🌐 Transient disconnect
-    await setClientState(clientId, STATES.DISCONNECTED)
-    publishEvent({
-      type: "status",
-      clientId,
-      state: "DISCONNECTED"
-    })
-    sockets.delete(clientId)
+    if (connection === "close") {
+      connectedClients.delete(clientId)
+      const statusCode =
+        lastDisconnect?.error?.output?.statusCode ??
+        lastDisconnect?.error?.output?.payload?.statusCode
 
-    setTimeout(() => {
-      console.log(`🔄 Reconnecting ${clientId}...`)
-      initClient(clientId)
-    }, 5000)
-  }
-})
+      if (statusCode === undefined && bootingClients.has(clientId)) {
+        console.log(`🟡 ${clientId} waiting for QR...`)
+        return
+      }
+
+      console.log(`❌ ${clientId} disconnected (${statusCode})`)
+
+      // 🚪 Logged out / Unauthorized
+      if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+        await setClientState(clientId, STATES.LOGGED_OUT)
+
+        publishEvent({
+          type: "status",
+          clientId,
+          state: "LOGGED_OUT"
+        })
+
+        const oldSock = sockets.get(clientId)
+
+        if (oldSock) {
+          oldSock.ev.removeAllListeners()
+          try { oldSock.end() } catch {}
+        }
+
+        sockets.delete(clientId)
+        clearSession(clientId)
+
+        console.log(`📲 ${clientId} requires new QR`)
+
+        // 🔥 Auto re-init to generate new QR
+        setTimeout(() => {
+          console.log(`🔄 Reinitializing ${clientId} for new QR`)
+          initClient(clientId)
+        }, 1000)
+
+        return
+      }
+
+      // 🌐 Transient disconnect
+      await setClientState(clientId, STATES.DISCONNECTED)
+      publishEvent({
+        type: "status",
+        clientId,
+        state: "DISCONNECTED"
+      })
+      sockets.delete(clientId)
+
+      setTimeout(() => {
+        console.log(`🔄 Reconnecting ${clientId}...`)
+        initClient(clientId)
+      }, 5000)
+    }
+  })
 
   sockets.set(clientId, sock)
   return sock
