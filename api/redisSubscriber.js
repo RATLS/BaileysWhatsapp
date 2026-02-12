@@ -11,6 +11,7 @@ sub.subscribe("wa:events")
 sub.on("message", (_, raw) => {
   try {
     const event = JSON.parse(raw)
+    console.log("REDIS EVENT:", event)
     broadcast(event.clientId, event)
   } catch (err) {
     console.error("Invalid Redis event", err)
