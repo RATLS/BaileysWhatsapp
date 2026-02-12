@@ -56,12 +56,14 @@ async function initClient(clientId) {
     const { connection, qr, lastDisconnect } = update
 
     if (qr) {
+
         await setClientState(clientId, STATES.QR_REQUIRED)
         publishEvent({
           type: "qr",
           clientId,
           qr
         })
+      console.log("🔥 QR BLOCK EXECUTED")
       console.log(`\n📲 Scan QR for ${clientId}\n`)
       require("qrcode-terminal").generate(qr, { small: true })
       bootingClients.delete(clientId)
