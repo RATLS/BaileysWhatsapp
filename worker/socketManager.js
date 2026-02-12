@@ -56,38 +56,43 @@ async function initClient(clientId) {
     const { connection, qr, lastDisconnect } = update
 
     if (qr) {
+      await setClientState(clientId, STATES.QR_REQUIRED)
 
-        await setClientState(clientId, STATES.QR_REQUIRED)
-        publishEvent({
-          type: "qr",
-          clientId,
-          qr
-        })
-      console.log("🔥 QR BLOCK EXECUTED")
-      console.log(`\n📲 Scan QR for ${clientId}\n`)
-      require("qrcode-terminal").generate(qr, { small: true })
+      // ✅ Save QR (important)
+      await redis.set(`wa:qr:${clientId}`, qr, "EX", 120)
+
+      publishEvent({
+        type: "qr",
+        clientId,
+        qr
+      })
+
       bootingClients.delete(clientId)
       return
     }
 
     if (connection === "open") {
+      console.log(`🟢 ${clientId} connection opened`)
+
       await setClientState(clientId, STATES.CONNECTED)
+
+      await redis.del(`wa:qr:${clientId}`)
+
       publishEvent({
         type: "status",
         clientId,
         state: "CONNECTED"
       })
 
-      setTimeout(() => {
-        startSenderLoop(clientId)
-      }, 2000)
-
       connectedClients.add(clientId)
-      console.log(`✅ ${clientId} connected`)
 
       bootingClients.delete(clientId)
 
-      // startSenderLoop(clientId)
+      console.log(`✅ ${clientId} connected successfully`)
+
+      setTimeout(() => {
+        startSenderLoop(clientId)
+      }, 2000)
 
       return
     }
