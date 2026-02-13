@@ -150,9 +150,7 @@ async function initClient(clientId) {
         state: "DISCONNECTED"
       })
 
-      console.log('socket before delete: ',sockets)
       sockets.delete(clientId)
-      console.log('socket after delete: ',sockets)
 
       setTimeout(() => {
         console.log(`🔄 Reconnecting ${clientId}...`)
@@ -161,7 +159,6 @@ async function initClient(clientId) {
     }
   })
 
-  sockets.set(clientId, sock)
   console.log('sockets after update: ',sockets)
   return sock
 }
