@@ -12,10 +12,13 @@ module.exports = async function (fastify) {
         if (!clientId) return
 
         // 🔒 Prevent double registration on multiple FE messages
-        if (!registeredClientId) {
-          registeredClientId = clientId
-          register(clientId, socket)
-        }
+        // if (!registeredClientId) {
+        //   registeredClientId = clientId
+        //   register(clientId, socket)
+        // }
+
+        registeredClientId = clientId
+        register(clientId, socket)
 
         // 🔁 Always send current state
         const state = await redis.hget("wa:clients:state", clientId)
