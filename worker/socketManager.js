@@ -150,7 +150,7 @@ async function initClient(clientId) {
           setTimeout(() => {
             console.log(`🔄 Reinitializing ${clientId} for new QR`)
             initClient(clientId)
-          }, 1000)
+          }, 5000)
 
           return
         }
