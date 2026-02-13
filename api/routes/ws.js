@@ -2,7 +2,7 @@ const { register } = require("../wsHub")
 const redis = require("../redis")
 
 module.exports = async function (fastify) {
-  fastify.get("/ws", { websocket: true }, (connection, req) => {
+  fastify.get("/ws", { websocket: true }, (socket, req) => {
     // Extract the actual WebSocket from Fastify's wrapper
     const socket = connection.socket
     
