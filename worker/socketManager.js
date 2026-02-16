@@ -151,18 +151,21 @@ async function initClient(clientId) {
 
       if (qr) {
         await setClientState(clientId, STATES.QR_REQUIRED)
-
-        // ✅ Save QR (important)
         await redis.set(`wa:qr:${clientId}`, qr, "EX", 120)
-
-        publishEvent({
-          type: "qr",
-          clientId,
-          qr
-        }).catch(err => console.error("Failed to publish QR event:", err))
-
-        // bootingClients.delete(clientId)
-        return
+        
+        // Try to publish, retry once if fails
+        let published = await publishEvent({ type: "qr", clientId, qr })
+        if (!published) {
+          console.warn("   Retrying QR publish...")
+          await sleep(500)
+          published = await publishEvent({ type: "qr", clientId, qr })
+        }
+        
+        if (published) {
+          console.log("   ✅ QR published successfully")
+        } else {
+          console.error("   ❌ QR publish failed after retry")
+        }
       }
 
       if (connection === "open") {
@@ -234,10 +237,10 @@ async function initClient(clientId) {
           console.log(`📲 ${clientId} requires new QR`)
 
           // Wait a bit longer to ensure publish has propagated
-          setTimeout(async () => {
-            console.log(`🔄 Reinitializing ${clientId} for new QR`)
-            await initClient(clientId)
-          }, 1500)  // Increased from 1000 to 1500ms
+          // setTimeout(async () => {
+          //   console.log(`🔄 Reinitializing ${clientId} for new QR`)
+          //   await initClient(clientId)
+          // }, 1500)
 
           return
         }

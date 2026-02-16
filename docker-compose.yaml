@@ -1,6 +1,15 @@
 services:
   redis:
-    image: redis:7
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --timeout 0
+      --tcp-keepalive 60
+      --maxclients 100
     ports:
       - "6379:6379"
     healthcheck:
@@ -8,6 +17,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
 
   worker:
     build: ./worker
@@ -17,6 +31,10 @@ services:
     volumes:
       - ./sessions:/sessions
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
 
   api:
     build: ./api
@@ -26,3 +44,7 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
