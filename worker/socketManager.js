@@ -9,10 +9,49 @@ const Redis = require("ioredis")
 const { sendMessageWithMedia } = require("./mediaSender")
 const { randomDelay } = require("./utils/delay")
 
+// Separate Redis connections to prevent blocking
 const redis = new Redis({
   host: "redis",
-  port: 6379
+  port: 6379,
+  enableOfflineQueue: true,
+  maxRetriesPerRequest: 3,
+  connectTimeout: 5000,
+  commandTimeout: 5000
 })
+
+// Separate connection for publishing (non-blocking)
+let redisPub = new Redis({
+  host: "redis",
+  port: 6379,
+  enableOfflineQueue: true,
+  maxRetriesPerRequest: 3,
+  connectTimeout: 5000,
+  commandTimeout: 5000
+})
+
+redis.on('error', (err) => console.error('❌ Redis error:', err.message))
+redisPub.on('error', (err) => console.error('❌ Redis PUB error:', err.message))
+
+// Function to ensure fresh Redis connection for publishing
+async function ensurePublishConnection() {
+  try {
+    await redisPub.ping()
+    return redisPub
+  } catch (err) {
+    console.warn('⚠️ Redis PUB connection failed, creating new one...')
+    redisPub.disconnect()
+    redisPub = new Redis({
+      host: "redis",
+      port: 6379,
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: 3,
+      connectTimeout: 5000,
+      commandTimeout: 5000
+    })
+    await redisPub.ping()
+    return redisPub
+  }
+}
 
 const sockets = new Map()
 const connectedClients = new Set()
@@ -24,31 +63,48 @@ const initializingClients = new Set()
 // const bootingClients = new Set()
 
 async function publishEvent(event) {
+  const startTime = Date.now()
   console.log("📤 PUBLISHING EVENT to stream:", event)
   
   try {
-    // Add timeout to prevent hanging
-    const publishPromise = redis.xadd(
+    // Ensure we have a working connection
+    const pubClient = await ensurePublishConnection()
+    
+    // Test Redis connection first
+    try {
+      const pingStart = Date.now()
+      await pubClient.ping()
+      console.log(`   ✅ Redis PING ok (${Date.now() - pingStart}ms)`)
+    } catch (pingErr) {
+      console.error(`   ❌ Redis PING failed:`, pingErr.message)
+      return null // Don't crash, just return null
+    }
+    
+    // Use dedicated publish connection to avoid blocking
+    const publishPromise = pubClient.xadd(
       'wa:events:stream',  // Stream key
       '*',                 // Auto-generate ID (timestamp-based)
       'data', JSON.stringify(event)  // Store event as JSON
     )
     
-    // Race between publish and 3-second timeout
+    // Race between publish and 10-second timeout (increased from 3s)
     const messageId = await Promise.race([
       publishPromise,
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Publish timeout after 3s')), 3000)
+        setTimeout(() => reject(new Error(`Publish timeout after 10s`)), 10000)
       )
     ])
     
-    console.log(`✅ Event published to stream, Message ID: ${messageId}`)
+    const duration = Date.now() - startTime
+    console.log(`✅ Event published to stream in ${duration}ms, Message ID: ${messageId}`)
     return messageId
   } catch (err) {
-    console.error("❌ Failed to publish event to stream:", err.message)
+    const duration = Date.now() - startTime
+    console.error(`❌ Failed to publish event to stream after ${duration}ms:`, err.message)
     console.error("   Event was:", JSON.stringify(event))
-    // Re-throw to let caller handle
-    throw err
+    
+    // Don't throw - return null to prevent crashes
+    return null
   }
 }
 
@@ -88,9 +144,10 @@ async function initClient(clientId) {
     sock.ev.on("creds.update", saveCreds)
 
     sock.ev.on("connection.update", async (update) => {
-      console.log(`📡 [${clientId}] connection.update`, JSON.stringify(update))
+      try {
+        console.log(`📡 [${clientId}] connection.update`, JSON.stringify(update))
 
-      const { connection, qr, lastDisconnect } = update
+        const { connection, qr, lastDisconnect } = update
 
       if (qr) {
         await setClientState(clientId, STATES.QR_REQUIRED)
@@ -151,16 +208,17 @@ async function initClient(clientId) {
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
           await setClientState(clientId, STATES.LOGGED_OUT)
 
-          // Publish LOGGED_OUT event and WAIT for it to complete
-          try {
-            await publishEvent({
-              type: "status",
-              clientId,
-              state: "LOGGED_OUT"
-            })
+          // Publish LOGGED_OUT event (won't throw on failure)
+          const publishResult = await publishEvent({
+            type: "status",
+            clientId,
+            state: "LOGGED_OUT"
+          })
+          
+          if (publishResult) {
             console.log(`✅ LOGGED_OUT event successfully published for ${clientId}`)
-          } catch (publishErr) {
-            console.error(`❌ Failed to publish LOGGED_OUT for ${clientId}:`, publishErr.message)
+          } else {
+            console.error(`⚠️ LOGGED_OUT event failed to publish for ${clientId} - continuing anyway`)
           }
 
           const oldSock = sockets.get(clientId)
@@ -198,6 +256,11 @@ async function initClient(clientId) {
           console.log(`🔄 Reconnecting ${clientId}...`)
           initClient(clientId)
         }, 5000)
+      }
+      } catch (connUpdateErr) {
+        console.error(`❌ Error in connection.update handler for ${clientId}:`, connUpdateErr.message)
+        console.error(`   Stack:`, connUpdateErr.stack)
+        // Don't crash - just log the error
       }
     })
 
@@ -247,6 +310,7 @@ async function startSenderLoop(clientId) {
 
       await sendMessageWithMedia(sock, jid, payload)
 
+      // 🎲 RANDOM DELAY AFTER SEND
       await sleep(randomBetween(2000, 5000))
     } catch (err) {
       console.error(`❌ Sender loop error for ${clientId}`, err)
