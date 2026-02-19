@@ -7,16 +7,14 @@ const { clearSession } = require("./sessionUtils")
 const { STATES, setClientState } = require("./clientState")
 const Redis = require("ioredis")
 const { sendMessageWithMedia } = require("./mediaSender")
-const { randomDelay } = require("./utils/delay")
+const { randomDelay } = require("./utils/delay")/media/dabablu/Data/RATLS/Baileys/worker/socketManager.js
 
 // Separate Redis connections to prevent blocking
 const redis = new Redis({
   host: "redis",
   port: 6379,
   enableOfflineQueue: true,
-  maxRetriesPerRequest: 3,
-  connectTimeout: 5000,
-  commandTimeout: 5000
+  maxRetriesPerRequest: 3
 })
 
 // Separate connection for publishing (non-blocking)
@@ -24,9 +22,7 @@ let redisPub = new Redis({
   host: "redis",
   port: 6379,
   enableOfflineQueue: true,
-  maxRetriesPerRequest: 3,
-  connectTimeout: 5000,
-  commandTimeout: 5000
+  maxRetriesPerRequest: 3
 })
 
 redis.on('error', (err) => console.error('❌ Redis error:', err.message))
