@@ -19,6 +19,14 @@ module.exports = async function (fastify) {
 
         clientId = data.clientId
 
+        // Register socket on first message (including ping) so reconnects
+        // that only send heartbeat messages still receive broadcasts.
+        if (!registered) {
+          register(clientId, socket)
+          registered = true
+          console.log(`✅ WebSocket registered for ${clientId}`)
+        }
+
         // Handle ping messages
         if (data.type === 'ping') {
           lastPing = Date.now()
@@ -29,13 +37,6 @@ module.exports = async function (fastify) {
             timestamp: Date.now()
           }))
           return
-        }
-
-        // Register socket on first message
-        if (!registered) {
-          register(clientId, socket)
-          registered = true
-          console.log(`✅ WebSocket registered for ${clientId}`)
         }
 
         // Get and send current state

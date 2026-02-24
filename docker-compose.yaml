@@ -28,6 +28,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    environment:
+      WA_DEVICE_NAME: "Admissions - CRM"
+      WA_DEVICE_PLATFORM: "Linux"
+      WA_DEVICE_VERSION: "120.0.0"
     volumes:
       - ./sessions:/sessions
     restart: unless-stopped

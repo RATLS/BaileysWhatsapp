@@ -7,6 +7,10 @@ const { STATES, setClientState } = require("./clientState")
 const Redis = require("ioredis")
 const { sendMessageWithMedia } = require("./mediaSender")
 
+const WA_DEVICE_NAME = process.env.WA_DEVICE_NAME || "Admissions - CRM"
+const WA_DEVICE_PLATFORM = process.env.WA_DEVICE_PLATFORM || "Linux"
+const WA_DEVICE_VERSION = process.env.WA_DEVICE_VERSION || "120.0.0"
+
 // Separate Redis connections to prevent blocking
 const redis = new Redis({
   host: "redis",
@@ -136,7 +140,8 @@ async function initClient(clientId) {
       logger: Pino({ level: "silent" }).child({level: "silent" }),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      version
+      version,
+      browser: [WA_DEVICE_NAME, WA_DEVICE_PLATFORM, WA_DEVICE_VERSION]
     })
 
     sockets.set(clientId, sock)
