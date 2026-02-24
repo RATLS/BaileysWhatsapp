@@ -53,6 +53,7 @@ const senderLoops = new Set()
 const senderRedisClients = new Map()
 const initializingClients = new Set()
 const reconnectAttempts = new Map()
+const recentNewLoginAt = new Map()
 
 
 // let isBooting = true
@@ -146,7 +147,11 @@ async function initClient(clientId) {
       try {
         console.log(`📡 [${clientId}] connection.update`, JSON.stringify(update))
 
-        const { connection, qr, lastDisconnect } = update
+        const { connection, qr, lastDisconnect, isNewLogin } = update
+
+      if (isNewLogin) {
+        recentNewLoginAt.set(clientId, Date.now())
+      }
 
       if (qr) {
         await setClientState(clientId, STATES.QR_REQUIRED)
@@ -170,6 +175,7 @@ async function initClient(clientId) {
       if (connection === "open") {
         console.log(`🟢 ${clientId} connection opened`)
         reconnectAttempts.delete(clientId)
+        recentNewLoginAt.delete(clientId)
 
         await setClientState(clientId, STATES.CONNECTED)
 
@@ -199,6 +205,8 @@ async function initClient(clientId) {
         const statusCode =
           lastDisconnect?.error?.output?.statusCode ??
           lastDisconnect?.error?.output?.payload?.statusCode
+        const sawRecentNewLogin =
+          Date.now() - (recentNewLoginAt.get(clientId) || 0) < 60_000
 
         // if (statusCode === undefined && bootingClients.has(clientId)) {
         //   console.log(`🟡 ${clientId} waiting for QR...`)
@@ -210,6 +218,7 @@ async function initClient(clientId) {
         // 🚪 Logged out / Unauthorized
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
           reconnectAttempts.delete(clientId)
+          recentNewLoginAt.delete(clientId)
           await setClientState(clientId, STATES.LOGGED_OUT)
 
           // Publish LOGGED_OUT event (won't throw on failure)
@@ -243,6 +252,30 @@ async function initClient(clientId) {
             await initClient(clientId)
           }, 1500)
 
+          return
+        }
+
+        // Baileys often emits 515 ("restart required") right after QR scan/new login.
+        // Treat this as an expected handover, not a hard disconnect.
+        if (statusCode === 515 && sawRecentNewLogin) {
+          await setClientState(clientId, STATES.CONNECTING)
+          await publishEvent({
+            type: "status",
+            clientId,
+            state: "CONNECTING"
+          })
+
+          const oldSock = sockets.get(clientId)
+          if (oldSock) {
+            oldSock.ev.removeAllListeners()
+            try { oldSock.end() } catch {}
+          }
+          sockets.delete(clientId)
+
+          console.log(`🔁 ${clientId} got post-login 515; restarting socket without session reset`)
+          setTimeout(() => {
+            initClient(clientId)
+          }, 1500)
           return
         }
 
