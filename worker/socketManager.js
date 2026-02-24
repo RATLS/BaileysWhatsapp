@@ -233,16 +233,16 @@ async function initClient(clientId) {
 
           console.log(`📲 ${clientId} requires new QR`)
 
-          // Wait a bit longer to ensure publish has propagated
-          // setTimeout(async () => {
-          //   console.log(`🔄 Reinitializing ${clientId} for new QR`)
-          //   await initClient(clientId)
-          // }, 1500)
+          // Auto reinitialize so the same client gets a fresh QR.
+          setTimeout(async () => {
+            console.log(`🔄 Reinitializing ${clientId} for new QR`)
+            await initClient(clientId)
+          }, 1500)
 
           return
         }
 
-        // 🌐 Transient disconnect
+        // 🌐 Disconnected: force full session reset and reinit for fresh QR.
         await setClientState(clientId, STATES.DISCONNECTED)
         await publishEvent({
           type: "status",
@@ -250,12 +250,19 @@ async function initClient(clientId) {
           state: "DISCONNECTED"
         })
 
+        const oldSock = sockets.get(clientId)
+        if (oldSock) {
+          oldSock.ev.removeAllListeners()
+          try { oldSock.end() } catch {}
+        }
+
         sockets.delete(clientId)
+        clearSession(clientId)
 
         setTimeout(() => {
-          console.log(`🔄 Reconnecting ${clientId}...`)
+          console.log(`🔄 Reinitializing ${clientId} after disconnect for fresh QR...`)
           initClient(clientId)
-        }, 5000)
+        }, 1500)
       }
       } catch (connUpdateErr) {
         console.error(`❌ Error in connection.update handler for ${clientId}:`, connUpdateErr.message)
