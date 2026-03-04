@@ -4,6 +4,13 @@ const STATE_KEY = "wa:clients:state"
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{1,120}$/
 
 module.exports = async function (fastify) {
+  function parseQueueEntry(raw, index) {
+    try {
+      return { index, raw, parsed: JSON.parse(raw) }
+    } catch {
+      return { index, raw, parsed: null }
+    }
+  }
 
   fastify.get("/clients", async () => {
     return await redis.hgetall(STATE_KEY)
@@ -87,6 +94,37 @@ module.exports = async function (fastify) {
     )
 
     return { ok: true, clientId }
+  })
+
+  fastify.get("/clients/:clientId/queue", async (req, res) => {
+    const { clientId } = req.params
+    const requestedLimit = Number(req.query && req.query.limit)
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200)
+      : 50
+    const queueKey = `wa:pending:${clientId}`
+    const total = await redis.llen(queueKey)
+    const rows = await redis.lrange(queueKey, 0, limit - 1)
+    const messages = rows.map((raw, idx) => parseQueueEntry(raw, idx))
+    return {
+      clientId,
+      total,
+      returned: messages.length,
+      limit,
+      messages
+    }
+  })
+
+  fastify.delete("/clients/:clientId/queue", async (req, res) => {
+    const { clientId } = req.params
+    const queueKey = `wa:pending:${clientId}`
+    const totalBefore = await redis.llen(queueKey)
+    await redis.del(queueKey)
+    return {
+      ok: true,
+      clientId,
+      cleared: totalBefore
+    }
   })
 
   fastify.get("/clients/:clientId/status", async (req, res) => {
