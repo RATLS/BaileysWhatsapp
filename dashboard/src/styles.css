@@ -152,13 +152,11 @@ button:disabled {
   border: 1px solid #2c2f39;
 }
 
-.row-actions button:nth-child(3),
-.row-actions button:nth-child(4) {
+.row-actions .btn-restart {
   border-color: rgba(255, 179, 71, 0.5);
 }
 
-.row-actions button:nth-child(5),
-.row-actions button:nth-child(6) {
+.row-actions .btn-stop {
   border-color: rgba(255, 107, 107, 0.5);
   color: #ffd3d3;
 }
@@ -167,6 +165,12 @@ button:disabled {
   border-color: rgba(255, 107, 107, 0.9) !important;
   color: #ffd3d3 !important;
   background: #2b1518 !important;
+}
+
+.active-action {
+  border-color: rgba(72, 201, 176, 0.9) !important;
+  color: #b8fff0 !important;
+  background: #132b2a !important;
 }
 
 .stat-row {
@@ -206,6 +210,56 @@ button:disabled {
 }
 
 .empty { color: var(--muted); font-size: 12px; }
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.queue-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.queue-error {
+  color: #ffb8b8;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.queue-list {
+  max-height: 360px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-item {
+  border: 1px solid var(--border);
+  background: #0f1014;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.queue-item-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.queue-text {
+  color: #d7d7d2;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
 
 @media (max-width: 900px) {
   .grid.wide { grid-template-columns: 1fr; }

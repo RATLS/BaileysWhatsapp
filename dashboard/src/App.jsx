@@ -11,12 +11,15 @@ function App() {
   const [clientStates, setClientStates] = useState({})
   const [activeClients, setActiveClients] = useState([])
   const [wsStats, setWsStats] = useState({})
-  const [selectedClient, setSelectedClient] = useState("")
   const [logs, setLogs] = useState("")
   const [logService, setLogService] = useState("worker")
   const [logTail, setLogTail] = useState(200)
   const [sendForm, setSendForm] = useState({ clientId: "", phoneNumber: "", text: "" })
   const [newClientId, setNewClientId] = useState("")
+  const [queueClientId, setQueueClientId] = useState("")
+  const [queueData, setQueueData] = useState(null)
+  const [queueLoading, setQueueLoading] = useState(false)
+  const [queueError, setQueueError] = useState("")
   const [loading, setLoading] = useState(false)
   const [lastRefresh, setLastRefresh] = useState(null)
 
@@ -35,6 +38,12 @@ function App() {
       body: JSON.stringify(body || {})
     })
     if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`)
+    return res.json()
+  }
+
+  async function apiDelete(path) {
+    const res = await fetch(`${apiBase}${path}`, { method: "DELETE" })
+    if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status}`)
     return res.json()
   }
 
@@ -101,8 +110,43 @@ function App() {
   }
 
   async function deleteClient(clientId) {
-    await fetch(`${apiBase}/clients/${encodeURIComponent(clientId)}`, { method: "DELETE" })
+    await apiDelete(`/clients/${encodeURIComponent(clientId)}`)
     await refreshAll()
+    if (queueClientId === clientId) {
+      setQueueClientId("")
+      setQueueData(null)
+      setQueueError("")
+    }
+  }
+
+  async function loadQueue(clientId) {
+    setQueueClientId(clientId)
+    setQueueLoading(true)
+    setQueueError("")
+    try {
+      const data = await apiGet(`/clients/${encodeURIComponent(clientId)}/queue?limit=100`)
+      setQueueData(data)
+    } catch (err) {
+      setQueueData(null)
+      setQueueError(`Failed to load queue for ${clientId}`)
+    } finally {
+      setQueueLoading(false)
+    }
+  }
+
+  async function clearQueue(clientId, confirm = true) {
+    if (confirm && !window.confirm(`Clear all pending messages for ${clientId}?`)) {
+      return
+    }
+    setQueueLoading(true)
+    setQueueError("")
+    try {
+      await apiDelete(`/clients/${encodeURIComponent(clientId)}/queue`)
+      await loadQueue(clientId)
+    } catch (err) {
+      setQueueError(`Failed to clear queue for ${clientId}`)
+      setQueueLoading(false)
+    }
   }
 
   async function sendTestMessage() {
@@ -210,12 +254,18 @@ function App() {
                     </div>
                   </div>
                   <div className="row-actions">
-                    <button onClick={() => setSelectedClient(clientId)}>Select</button>
+                    <button
+                      className={queueClientId === clientId ? "active-action" : ""}
+                      onClick={() => loadQueue(clientId)}
+                    >
+                      View Queue
+                    </button>
+                    <button onClick={() => clearQueue(clientId, true)}>Clear Queue</button>
                     <button onClick={() => reconnectClient(clientId)}>Reconnect</button>
-                    <button onClick={() => restartClient(clientId, false)}>Restart</button>
-                    <button onClick={() => restartClient(clientId, true)}>Reset+Restart</button>
-                    <button onClick={() => stopClient(clientId, false)}>Stop</button>
-                    <button onClick={() => stopClient(clientId, true)}>Reset+Stop</button>
+                    <button className="btn-restart" onClick={() => restartClient(clientId, false)}>Restart</button>
+                    <button className="btn-restart" onClick={() => restartClient(clientId, true)}>Reset+Restart</button>
+                    <button className="btn-stop" onClick={() => stopClient(clientId, false)}>Stop</button>
+                    <button className="btn-stop" onClick={() => stopClient(clientId, true)}>Reset+Stop</button>
                     <button className="danger" onClick={() => deleteClient(clientId)}>Delete</button>
                   </div>
                 </div>
@@ -248,17 +298,47 @@ function App() {
 
       <section className="grid">
         <div className="card">
-          <div className="section-title">Selected Client</div>
+          <div className="section-title">Client Queue</div>
+          {!queueClientId && <div className="empty">Pick a client and click View Queue.</div>}
+          {queueClientId && (
+            <>
+              <div className="queue-header">
+                <div className="meta">
+                  Client: {queueClientId} · Total queued: {queueData?.total ?? "-"} · Showing: {queueData?.returned ?? 0}
+                </div>
+                <div className="queue-actions">
+                  <button onClick={() => loadQueue(queueClientId)} disabled={queueLoading}>
+                    {queueLoading ? "Loading..." : "Refresh Queue"}
+                  </button>
+                  <button onClick={() => clearQueue(queueClientId, true)} disabled={queueLoading}>
+                    Clear Queue
+                  </button>
+                </div>
+              </div>
+              {queueError && <div className="queue-error">{queueError}</div>}
+              <div className="queue-list">
+                {!queueLoading && queueData?.messages?.length === 0 && (
+                  <div className="empty">Queue is empty.</div>
+                )}
+                {queueData?.messages?.map((entry) => {
+                  const p = entry.parsed || {}
+                  return (
+                    <div key={`${entry.index}-${entry.raw?.slice(0, 20)}`} className="queue-item">
+                      <div className="queue-item-top">
+                        <strong>#{entry.index + 1}</strong>
+                        <span className="meta">
+                          {p.type || "UNKNOWN"} · {p.phoneNumber || "n/a"} · files: {Array.isArray(p.files) ? p.files.length : 0}
+                        </span>
+                      </div>
+                      <div className="queue-text">{p.text || "(no text)"}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
           <div className="meta">
-            {selectedClient ? `Selected: ${selectedClient}` : "Select a client to pin here"}
-          </div>
-          <div className="actions">
-            <button disabled={!selectedClient} onClick={() => reconnectClient(selectedClient)}>Reconnect</button>
-            <button disabled={!selectedClient} onClick={() => restartClient(selectedClient, false)}>Restart</button>
-            <button disabled={!selectedClient} onClick={() => restartClient(selectedClient, true)}>Reset+Restart</button>
-            <button disabled={!selectedClient} onClick={() => stopClient(selectedClient, false)}>Stop</button>
-            <button disabled={!selectedClient} onClick={() => stopClient(selectedClient, true)}>Reset+Stop</button>
-            <button className="danger" disabled={!selectedClient} onClick={() => deleteClient(selectedClient)}>Delete</button>
+            Queue panel is read-only for payload details; use Clear Queue to drop pending jobs.
           </div>
         </div>
       </section>
