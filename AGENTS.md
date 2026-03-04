@@ -1,66 +1,96 @@
 # AGENTS.md
 
-This file captures the current working rules and system behavior for the Baileys project.
+This document is the operational source of truth for agents working in this repository.
 
-## Project Snapshot
+## Scope
 
-- Services:
-  - `worker` (Baileys socket manager + sender loop)
-  - `api` (Fastify REST + WebSocket + Redis stream consumer)
-  - `dashboard` (React UI + Express server)
-  - `redis` (command/state/event bus)
-- Main event pipeline: Redis Streams (`wa:events:stream`), not pub/sub.
+- Keep docs and behavior aligned with the current codebase.
+- Favor stability and operational safety over feature speed.
+- Do not silently change message delivery guarantees.
 
-## Canonical Redis Keys
+## System Summary
 
-- `wa:clients:state` (hash): logical client state
-- `wa:commands` (list): control commands for worker
-- `wa:pending:<clientId>` (list): outbound queue per client
-- `wa:qr:<clientId>` (string): latest QR
-- `wa:events:stream` (stream): worker -> API events
-- `wa:events:dlq` (stream): poison events from API consumer
+Services:
 
-## Queue Delivery Contract (Important)
+- `worker`: Baileys socket lifecycle + outbound sender loops
+- `api`: Fastify routes + websocket gateway + stream consumer
+- `redis`: command/state/queue/event store
+- `dashboard`: operations UI + server for container log access
 
-Current expected behavior:
+Primary event path is Redis Streams (`wa:events:stream`). Pub/sub files exist but are legacy.
 
-1. API enqueues outbound jobs into `wa:pending:<clientId>`.
-2. Worker sender loop **must not dequeue** while client is not connected.
-3. Messages remain queued until socket exists and client is connected.
-4. Sending is one-by-one with random delay between successful sends.
-5. If send fails after dequeue, message is re-queued for retry.
+## Critical Runtime Contracts
 
-Do not change this behavior without explicit approval.
+### 1) Queue Reliability Contract
 
-## Media Sending Rules
+Must remain true unless explicitly approved otherwise:
 
-- `image/*` and `video/*` are caption-capable.
-- `application/pdf` and other documents are sent as document + separate text message.
-- Invalid media payload should fail safely (no process crash).
+1. Outbound jobs are enqueued to `wa:pending:<clientId>`.
+2. Worker sender loop must not pop from queue unless client is connected.
+3. Jobs remain in queue while client is uninitialized/disconnected.
+4. Sending is sequential (one message at a time).
+5. Random delay between sends is preserved.
+6. Send failure after dequeue must re-queue the job.
 
-## API Stability Rules
+### 2) Client Lifecycle Contract
 
-- `POST /clients/:clientId` is idempotency-protected:
-  - invalid `clientId` -> `400`
-  - existing client -> `409` (do not reset state)
-- `POST /messages/send` validates body and file shape.
-- Stream consumer:
-  - validates event structure
-  - tracks failures
-  - moves poison events to DLQ
-  - uses `XAUTOCLAIM` to recover stale pending entries from dead consumers
+Current states in Redis hash `wa:clients:state`:
 
-## Dashboard Operational Rules
+- `CREATED`, `CONNECTING`, `QR_REQUIRED`, `CONNECTED`, `DISCONNECTED`, `LOGGED_OUT`, `STOPPED`
 
-- No duplicate “selected client” action section at bottom.
-- Client row actions are primary control surface.
-- Queue operations supported:
-  - view queue per listed client
-  - clear queue per listed client
-  - manual queue lookup/clear by entering any `clientId`
-    - includes clients not initialized or not visible in state list
+Important transitions:
 
-## Files To Read First
+- `POST /clients/:clientId` sets up logical client and enqueues `ADD_CLIENT`
+- `401`/logout -> `LOGGED_OUT` + session clear + auto reinit
+- `STOP_CLIENT` -> `STOPPED` with no auto-reconnect
+
+### 3) Stream Consumer Contract
+
+`api/streamConsumer.js` must:
+
+- consume from `wa:events:stream` consumer group
+- validate payload shape before broadcast
+- ack successful messages
+- move poison messages to DLQ stream (`wa:events:dlq` default)
+- recover stale pending with `XAUTOCLAIM`
+
+## API Contracts to Preserve
+
+- `POST /clients/:clientId`
+  - validates `clientId`
+  - returns `409` for existing client (no state reset)
+- `POST /messages/send`
+  - validates body, file structure, and non-empty content
+- Queue endpoints:
+  - `GET /clients/:clientId/queue`
+  - `DELETE /clients/:clientId/queue`
+
+## Dashboard UX Contracts to Preserve
+
+- No duplicate bottom "selected client actions" block.
+- Client row is primary control area.
+- Queue panel supports:
+  - per-row queue view/clear
+  - manual queue lookup by arbitrary `clientId` (including non-initialized clients)
+
+## Canonical Keys
+
+- `wa:clients:state`
+- `wa:commands`
+- `wa:pending:<clientId>`
+- `wa:qr:<clientId>`
+- `wa:clients:active`
+- `wa:events:stream`
+- `wa:events:dlq`
+
+## Legacy/Non-Primary Paths
+
+- `worker/old-socketManager.js`
+- `api/redisSubscriber.js`
+
+Do not wire these back into main flow unless explicitly requested.
+
+## Files to Review First Before Any Change
 
 1. `worker/socketManager.js`
 2. `worker/mediaSender.js`
@@ -69,13 +99,18 @@ Do not change this behavior without explicit approval.
 5. `api/routes/messages.js`
 6. `dashboard/src/App.jsx`
 
-## Change Discipline
+## Change Checklist (Mandatory)
 
-- Keep queue reliability guarantees intact.
-- Prefer additive, backward-compatible API changes.
-- Avoid introducing alternate event path (pub/sub) unless explicitly requested.
-- If changing queue/state semantics, update:
-  - `README.md`
-  - this `AGENTS.md`
-  - dashboard UX (if operator flow changes)
+When changing queue/state/event behavior:
 
+1. Update tests or add focused validation steps.
+2. Update `README.md` and this `AGENTS.md` in same PR.
+3. Document migration/rollback risk in PR description.
+4. Keep changes backward-compatible unless explicitly approved.
+
+## Current Known Risks (for planning)
+
+- API/WS authentication is not implemented.
+- Redis persistence is disabled in compose defaults.
+- Redis host config is hardcoded in several modules.
+- Outbound queue has requeue-on-failure but no retry cap/outbound DLQ.
