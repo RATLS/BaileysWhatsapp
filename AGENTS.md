@@ -30,7 +30,7 @@ Must remain true unless explicitly approved otherwise:
 2. Worker sender loop must not pop from queue unless client is connected.
 3. Jobs remain in queue while client is uninitialized/disconnected.
 4. Sending is sequential (one message at a time).
-5. Random delay between sends is preserved.
+5. Random delay between sends is preserved. Runtime config may change the min/max bounds, but a fallback delay must exist if config is missing or invalid.
 6. Send failure after dequeue must re-queue the job.
 
 ### 2) Client Lifecycle Contract
@@ -62,6 +62,10 @@ Important transitions:
 - `POST /clients/:clientId`
   - validates `clientId`
   - returns `409` for existing client (no state reset)
+- `GET /config/send-delay`
+- `POST /config/send-delay`
+  - validates `minMs`/`maxMs`
+  - must preserve a safe fallback if config is absent or malformed
 - `POST /messages/send`
   - validates body, file structure, and non-empty content
 - Queue endpoints:
@@ -85,13 +89,7 @@ Important transitions:
 - `wa:clients:active`
 - `wa:events:stream`
 - `wa:events:dlq`
-
-## Legacy/Non-Primary Paths
-
-- `worker/old-socketManager.js`
-- `api/redisSubscriber.js`
-
-Do not wire these back into main flow unless explicitly requested.
+- `wa:config:sendDelay`
 
 ## Files to Review First Before Any Change
 

@@ -1,6 +1,6 @@
 # Baileys WhatsApp Worker + API (Redis-Orchestrated)
 
-Containerized WhatsApp backend with four services:
+Containerized WhatsApp backend with five services:
 
 - `proxy`: Nginx TLS terminator for HTTPS/WSS origin traffic
 - `worker`: runs Baileys sockets (one per `clientId`) and sends queued messages.
@@ -48,7 +48,6 @@ Redis Lists/Hash/Keys ◄────────── API + Worker share comma
 │   ├── index.js
 │   ├── logger.js
 │   ├── redis.js
-│   ├── redisSubscriber.js       # legacy (not used)
 │   ├── streamConsumer.js
 │   ├── wsHub.js
 │   └── routes
@@ -62,7 +61,6 @@ Redis Lists/Hash/Keys ◄────────── API + Worker share comma
 │   ├── clientState.js
 │   ├── logger.js
 │   ├── mediaSender.js
-│   ├── old-socketManager.js     # legacy
 │   ├── sessionUtils.js
 │   └── socketManager.js
 └── dashboard
@@ -82,6 +80,7 @@ Redis Lists/Hash/Keys ◄────────── API + Worker share comma
 - `wa:clients:active` (Set): active sockets known by worker
 - `wa:events:stream` (Stream): worker -> API events (`data` JSON)
 - `wa:events:dlq` (Stream): poison events moved by API stream consumer
+- `wa:config:sendDelay` (String/JSON): runtime send delay config `{ minMs, maxMs }`
 
 ## 4) Runtime Behavior
 
@@ -103,7 +102,9 @@ Redis Lists/Hash/Keys ◄────────── API + Worker share comma
 - API always enqueues outbound payloads into `wa:pending:<clientId>`.
 - Worker sender loop **does not dequeue** while socket is missing or client is not connected.
 - Queue items remain in Redis until client becomes `CONNECTED`.
-- Sending is one-by-one with random delay (`2-5s`) between successful sends.
+- Sending is one-by-one with random delay between successful sends.
+- Delay is configurable at runtime through Redis-backed API/dashboard config.
+- If no config exists or stored config is invalid, worker falls back to a default delay of `3-8s`.
 - If send fails after dequeue, worker re-queues message and retries later.
 
 This supports the edge case where messages are pushed before client is initialized.
@@ -123,6 +124,8 @@ This supports the edge case where messages are pushed before client is initializ
 ### 5.2 Client management
 
 - `GET /clients`
+- `GET /config/send-delay`
+- `POST /config/send-delay` body `{ minMs, maxMs }`
 - `POST /clients/:clientId`
   - validates `clientId` format
   - returns `409` if already exists (no state reset)
@@ -190,6 +193,7 @@ Capabilities:
 - queue tools:
   - per-client `View Queue` and `Clear Queue`
   - manual queue lookup/clear for any `clientId` (including non-initialized clients)
+  - global send-delay controls backed by Redis runtime config
 
 ## 8) Docker Compose Notes
 
@@ -269,8 +273,6 @@ ls -l nginx/certs
 - API and WS endpoints are unauthenticated; CORS is permissive.
 - Redis host is still hardcoded to `redis` in multiple worker/api modules.
 - Outbound queue has requeue-on-failure but no explicit retry counter / outbound DLQ.
-- `old-socketManager.js` and `api/redisSubscriber.js` are legacy and not active path.
-
 ## 10) Quick Commands
 
 Create client:
