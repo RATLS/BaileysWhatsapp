@@ -131,17 +131,17 @@ async function initClient(clientId) {
     return
   }
 
+  if (sockets.has(clientId)) {
+    clientLog(clientId, "warn", `⚠️ already initialized`)
+    return sockets.get(clientId)
+  }
+
   stoppedClients.delete(clientId)
   initializingClients.add(clientId)
 
   try{
   // bootingClients.add(clientId)
     await setClientState(clientId, STATES.CONNECTING)
-
-    if (sockets.has(clientId)) {
-      clientLog(clientId, "warn", `⚠️ already initialized`)
-      return sockets.get(clientId)
-    }
 
     const sessionPath = `/sessions/${clientId}`
 
@@ -334,45 +334,37 @@ async function initClient(clientId) {
         const attempt = (reconnectAttempts.get(clientId) || 0) + 1
         reconnectAttempts.set(clientId, attempt)
 
-        // Cap retry loops; then force a fresh auth cycle so QR can be generated again.
         if (attempt > 8) {
           clientLog(
             clientId,
             "error",
-            `🛑 exceeded reconnect attempts (${attempt - 1}), forcing fresh session for QR recovery`
+            `🛑 exceeded reconnect attempts (${attempt - 1}); continuing reconnects with existing session`
           )
-          reconnectAttempts.delete(clientId)
-          clearSession(clientId)
-          await setClientState(clientId, STATES.CONNECTING)
-          await publishEvent({
-            type: "status",
-            clientId,
-            state: "CONNECTING"
-          })
-          setTimeout(() => {
-            clientLog(clientId, "info", "🔄 Reinitializing after reconnect cap with fresh session")
-            initClient(clientId)
-          }, 1500)
-          return
         }
 
-        const shouldPreserveSession =
+        const isKnownRecoverableTransportDisconnect =
           statusCode === 405 ||
           statusCode === 408 ||
           statusCode === 428
 
-        // Only force fresh session for disconnects that are likely auth/session corruption.
-        if (!shouldPreserveSession) {
-          clearSession(clientId)
-        } else {
+        // Preserve the existing auth session for all reconnect attempts unless we
+        // have explicit evidence of logout (handled above) or we hit the retry cap.
+        // Clearing auth on ordinary disconnects causes unnecessary QR churn.
+        if (isKnownRecoverableTransportDisconnect) {
           clientLog(
             clientId,
             "warn",
             `⚠️ got ${statusCode}; preserving session to avoid QR/reset loop`
           )
+        } else {
+          clientLog(
+            clientId,
+            "warn",
+            `⚠️ got ${statusCode}; retrying with existing session to preserve login`
+          )
         }
 
-        const delayMs = shouldPreserveSession
+        const delayMs = isKnownRecoverableTransportDisconnect
           ? Math.min(15000 * attempt, 120000)
           : Math.min(3000 * attempt, 30000)
 
@@ -626,5 +618,26 @@ module.exports = {
   startSenderLoop,
   restartClient,
   stopClient,
-  deleteClient
+  deleteClient,
+  _test: {
+    resetState() {
+      sockets.clear()
+      connectedClients.clear()
+      senderLoops.clear()
+      senderStopFlags.clear()
+      senderRedisClients.forEach((client) => {
+        try { client.disconnect() } catch {}
+      })
+      senderRedisClients.clear()
+      initializingClients.clear()
+      reconnectAttempts.clear()
+      recentNewLoginAt.clear()
+      stoppedClients.clear()
+    },
+    setConnectedSocket(clientId, sock) {
+      sockets.set(clientId, sock)
+      connectedClients.add(clientId)
+    },
+    stopSenderLoop
+  }
 }

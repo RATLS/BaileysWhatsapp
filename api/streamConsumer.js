@@ -2,7 +2,7 @@ const Redis = require("ioredis")
 const { broadcast } = require("./wsHub")
 const { info, warn, error, debug } = require("./logger")
 
-const redis = new Redis({
+let redis = new Redis({
   host: process.env.REDIS_HOST || "redis",
   port: 6379,
   retryStrategy(times) {
@@ -357,5 +357,18 @@ module.exports = {
   startConsumer,
   stopConsumer,
   getStatus,
-  isConsuming: () => isConsuming
+  isConsuming: () => isConsuming,
+  _test: {
+    fieldsToObject,
+    processMessage,
+    handleProcessResult,
+    resetState() {
+      messageFailures.clear()
+      isConsuming = false
+      consumerRunning = false
+    },
+    setRedisClient(client) {
+      redis = client
+    }
+  }
 }

@@ -1,259 +1,713 @@
-# Baileys WhatsApp Worker + API (Redis-Orchestrated)
+# Baileys WhatsApp Worker + API
 
-Containerized WhatsApp backend with five services:
+Redis-orchestrated WhatsApp backend built around Baileys, Fastify, and a small operations dashboard.
 
-- `proxy`: Nginx TLS terminator for HTTPS/WSS origin traffic
-- `worker`: runs Baileys sockets (one per `clientId`) and sends queued messages.
-- `api`: Fastify REST + WebSocket endpoints, and Redis stream consumer.
-- `redis`: shared state, command, queue, and event bus.
-- `dashboard`: React + Vite UI for operations and logs.
+This README is intended to be enough to understand the codebase before making changes. It documents the actual runtime model, data contracts, operational defaults, and the files that own each behavior.
 
-## 1) Architecture
+## 1) What This Repo Does
 
-```text
-Client / Frontend
-   │
-   ├── REST/HTTPS ───────────────► Proxy (Nginx)
-   │                               └── forwards to API (Fastify)
-   │
-   ├── REST ─────────────────────► API (Fastify)
-   │                               ├── writes to Redis (commands / queues)
-   │                               ├── reads state/QR from Redis
-   │                               └── exposes /ws for realtime state/QR
-   │
-   └── WebSocket (/ws, WSS) ◄──── wsHub broadcasts
-                                   ▲
-                                   │
-Redis Stream wa:events:stream ◄── Worker publishes QR/status
-                                   │
-Redis Lists/Hash/Keys ◄────────── API + Worker share commands/state/queues
-                                   │
-                                   ▼
-                              Worker (Baileys socket manager)
-```
+The system manages multiple WhatsApp clients identified by `clientId`.
 
-## 2) Current Repository Structure
+For each client, the platform can:
+
+- create and initialize a Baileys session
+- surface QR codes and state changes in realtime
+- queue outbound text/media messages in Redis
+- send queued jobs only while the client is connected
+- restart, stop, reconnect, or delete clients
+- inspect queues and logs from the dashboard
+
+The architecture is deliberately split into control-plane and execution-plane services:
+
+- `api`: accepts HTTP/WebSocket requests and writes commands/queue items into Redis
+- `worker`: owns Baileys sockets and drains outbound queues
+- `redis`: shared system state, command bus, queue store, QR cache, and event stream
+- `dashboard`: operational UI plus authenticated log viewer
+- `proxy`: Nginx TLS terminator in front of the API
+
+## 2) Mental Model
+
+Think of the codebase in terms of three flows:
+
+1. Client lifecycle flow
+   API writes a command -> worker starts or mutates a socket -> worker writes state + events -> API broadcasts to subscribed WebSocket clients.
+
+2. Outbound message flow
+   API validates input -> API enqueues into `wa:pending:<clientId>` -> worker sender loop waits until that client is connected -> worker dequeues one job at a time and sends it.
+
+3. Realtime flow
+   Worker publishes status/QR events to Redis Stream `wa:events:stream` -> API stream consumer validates and acknowledges them -> API broadcasts them through `wsHub` to client-specific WebSocket subscribers.
+
+## 3) Repository Structure
 
 ```text
 .
 ├── AGENTS.md
 ├── README.md
 ├── docker-compose.yaml
-├── nginx
-│   ├── certs
-│   │   └── .gitkeep
-│   └── conf.d
-│       └── default.conf
-├── api
+├── nginx/
+│   ├── certs/
+│   └── conf.d/default.conf
+├── api/
 │   ├── index.js
 │   ├── logger.js
 │   ├── redis.js
 │   ├── streamConsumer.js
 │   ├── wsHub.js
-│   └── routes
-│       ├── clients.js
-│       ├── debug-routes.js
-│       ├── messages.js
-│       └── ws.js
-├── worker
+│   ├── routes/
+│   │   ├── clients.js
+│   │   ├── debug-routes.js
+│   │   ├── messages.js
+│   │   └── ws.js
+│   └── tests/
+├── worker/
 │   ├── index.js
 │   ├── commandListener.js
 │   ├── clientState.js
 │   ├── logger.js
 │   ├── mediaSender.js
 │   ├── sessionUtils.js
-│   └── socketManager.js
-└── dashboard
-    ├── server/index.js
-    └── src
-        ├── App.jsx
-        └── styles.css
+│   ├── socketManager.js
+│   └── tests/
+├── dashboard/
+│   ├── server/index.js
+│   └── src/App.jsx
+├── logs/
+└── sessions/
 ```
 
-## 3) Redis Keys and Contracts
+## 4) Service Responsibilities
 
-- `wa:clients:state` (Hash): `clientId -> state`
-  - states: `CREATED | CONNECTING | QR_REQUIRED | CONNECTED | DISCONNECTED | LOGGED_OUT | STOPPED`
-- `wa:commands` (List): worker control commands (`ADD_CLIENT`, `RESTART_CLIENT`, `STOP_CLIENT`, `DELETE_CLIENT`)
-- `wa:pending:<clientId>` (List): outbound message queue per client
-- `wa:qr:<clientId>` (String, TTL 120s): latest QR payload
-- `wa:clients:active` (Set): active sockets known by worker
-- `wa:events:stream` (Stream): worker -> API events (`data` JSON)
-- `wa:events:dlq` (Stream): poison events moved by API stream consumer
-- `wa:config:sendDelay` (String/JSON): runtime send delay config `{ minMs, maxMs }`
+### 4.1 `worker`
 
-## 4) Runtime Behavior
+Primary files:
 
-### 4.1 Client lifecycle
+- `worker/index.js`
+- `worker/commandListener.js`
+- `worker/socketManager.js`
+- `worker/mediaSender.js`
 
-1. `POST /clients/:clientId` creates logical client (`CREATED`) and enqueues `ADD_CLIENT`.
-2. Worker initializes client (`CONNECTING`) and starts Baileys socket.
-3. On QR: state `QR_REQUIRED`, QR stored in `wa:qr:<clientId>`, QR event published to stream.
-4. On open: state `CONNECTED`, QR key deleted, status event published.
-5. On `401` / logged out: state `LOGGED_OUT`, session cleared, auto reinit for fresh QR.
-6. On `515` after new login: treated as expected restart (state `CONNECTING`, no session reset).
-7. On other disconnects: state `DISCONNECTED`, retry with capped backoff.
-   - transport/time-out disconnects such as `405`, `408`, and `428` preserve the existing session during retries to avoid unnecessary QR churn.
-   - if retry cap is exceeded, worker forces a fresh session reset and reinitializes to regenerate QR.
-8. Manual `stop` moves client to `STOPPED` and prevents auto-reconnect.
+Responsibilities:
 
-### 4.2 Outbound queue guarantees (current)
+- listen on Redis list `wa:commands`
+- initialize one Baileys socket per `clientId`
+- track connection lifecycle and Redis client state
+- publish QR/status events into `wa:events:stream`
+- maintain sender loops for outbound jobs
+- clear session files when required
 
-- API always enqueues outbound payloads into `wa:pending:<clientId>`.
-- Worker sender loop **does not dequeue** while socket is missing or client is not connected.
-- Queue items remain in Redis until client becomes `CONNECTED`.
-- Sending is one-by-one with random delay between successful sends.
-- Delay is configurable at runtime through Redis-backed API/dashboard config.
-- If no config exists or stored config is invalid, worker falls back to a default delay of `3-8s`.
-- If send fails after dequeue, worker re-queues message and retries later.
+Important implementation details:
 
-This supports the edge case where messages are pushed before client is initialized.
+- session files are stored under `/sessions/<clientId>`
+- state is written to Redis hash `wa:clients:state`
+- active worker-owned sockets are mirrored in Redis set `wa:clients:active`
+- one dedicated Redis connection is used per sender loop because `BRPOP` is blocking
+- a separate Redis publisher connection is used for stream publishing to reduce interference with other worker operations
 
-### 4.3 Media behavior
+### 4.2 `api`
 
-- Image/video can use caption.
-- PDF/documents are sent as document + separate text message.
-- Invalid media payloads fail safely (validation + guarded builder).
+Primary files:
 
-## 5) API Endpoints
+- `api/index.js`
+- `api/routes/clients.js`
+- `api/routes/messages.js`
+- `api/routes/ws.js`
+- `api/routes/debug-routes.js`
+- `api/streamConsumer.js`
+- `api/wsHub.js`
 
-### 5.1 Health
+Responsibilities:
 
-- `GET /health` -> `{ status: "ok" }`
+- expose REST endpoints for client lifecycle and message enqueueing
+- expose `GET /ws` for realtime client-specific updates
+- read QR/state snapshots from Redis for newly registered sockets
+- consume worker events from `wa:events:stream`
+- broadcast valid events to interested WebSocket clients
 
-### 5.2 Client management
+Important implementation details:
+
+- CORS is currently permissive: `origin: true`
+- Redis host defaults to `redis`
+- the API starts the stream consumer during process startup
+
+### 4.3 `dashboard`
+
+Primary files:
+
+- `dashboard/server/index.js`
+- `dashboard/src/App.jsx`
+
+Responsibilities:
+
+- authenticated operations UI on port `8080`
+- client lifecycle buttons
+- queue view/clear tools
+- send-delay configuration UI
+- basic message enqueue form
+- container log viewer through Docker socket access
+
+Important implementation details:
+
+- dashboard auth is HTTP Basic Auth
+- defaults are `DASH_USER=admin`, `DASH_PASS=admin` in code
+- compose overrides `DASH_PASS` to `change-me`
+- log access depends on mounting `/var/run/docker.sock`
+
+### 4.4 `proxy`
+
+Purpose:
+
+- terminates TLS for HTTPS and WSS
+- forwards traffic to the API service
+
+The API itself stays on internal Docker port `3000`; external HTTPS/WSS should go through Nginx on `443`.
+
+## 5) Redis Data Model
+
+These keys are the runtime contracts the rest of the code assumes:
+
+- `wa:clients:state`
+  Redis hash of `clientId -> state`
+
+- `wa:commands`
+  Redis list used as a worker command queue
+
+- `wa:pending:<clientId>`
+  Redis list containing outbound jobs for one client
+
+- `wa:qr:<clientId>`
+  Redis string holding the latest QR payload, TTL 120 seconds
+
+- `wa:clients:active`
+  Redis set of worker-initialized active sockets
+
+- `wa:events:stream`
+  Redis stream carrying QR/status/test events from worker or debug routes
+
+- `wa:events:dlq`
+  Redis stream used by the API stream consumer for poison messages
+
+- `wa:config:sendDelay`
+  Redis JSON string with runtime send-delay config:
+  `{ "minMs": number, "maxMs": number }`
+
+## 6) Client States
+
+The worker and API currently operate on these states:
+
+- `CREATED`
+- `CONNECTING`
+- `QR_REQUIRED`
+- `CONNECTED`
+- `DISCONNECTED`
+- `LOGGED_OUT`
+- `STOPPED`
+
+Special note:
+
+- `DELETE_CLIENT` removes the client from `wa:clients:state`, clears queue and QR keys, clears the session directory, and publishes a `DELETED` status event. `DELETED` is an event state, not a persisted hash state.
+
+## 7) Command Flow
+
+Worker control is command-driven through `wa:commands`.
+
+Command payloads:
+
+- `ADD_CLIENT`
+- `RESTART_CLIENT`
+- `STOP_CLIENT`
+- `DELETE_CLIENT`
+
+Who writes commands:
+
+- `POST /clients/:clientId` -> `ADD_CLIENT`
+- `POST /clients/:clientId/reconnect` -> `ADD_CLIENT`
+- `POST /clients/:clientId/restart` -> `RESTART_CLIENT`
+- `POST /clients/:clientId/stop` -> `STOP_CLIENT`
+- `DELETE /clients/:clientId` -> `DELETE_CLIENT`
+
+Who consumes commands:
+
+- `worker/commandListener.js` blocks on `BRPOP wa:commands`
+- the listener dispatches each command into `socketManager`
+
+## 8) Actual Client Lifecycle
+
+This section mirrors `worker/socketManager.js`.
+
+### 8.1 Create and initialize
+
+1. `POST /clients/:clientId` validates the `clientId`.
+2. API returns `409` if the client already exists in `wa:clients:state`.
+3. API writes `CREATED` into `wa:clients:state`.
+4. API enqueues `{ type: "ADD_CLIENT", clientId }` into `wa:commands`.
+5. Worker receives the command and calls `initClient(clientId)`.
+6. Worker sets state to `CONNECTING`.
+7. Worker loads or creates auth state from `/sessions/<clientId>`.
+8. Worker fetches the latest Baileys WhatsApp version at startup of that socket.
+
+### 8.2 QR issuance
+
+When Baileys emits a QR:
+
+- worker sets state `QR_REQUIRED`
+- worker stores QR at `wa:qr:<clientId>` with TTL 120 seconds
+- worker publishes `{ type: "qr", clientId, qr }` to `wa:events:stream`
+- the publish is retried once if the first attempt fails
+
+### 8.3 Open connection
+
+When Baileys reports `connection === "open"`:
+
+- worker clears reconnect counters
+- worker sets state `CONNECTED`
+- worker deletes `wa:qr:<clientId>`
+- worker publishes a `status` event with state `CONNECTED`
+- worker adds the client to `connectedClients`
+- worker starts the sender loop after a 2 second delay
+
+### 8.4 Logged out / unauthorized
+
+On `401` or `DisconnectReason.loggedOut`:
+
+- worker sets state `LOGGED_OUT`
+- worker publishes a `LOGGED_OUT` status event
+- worker removes the socket
+- worker removes the client from `wa:clients:active`
+- worker clears the session directory
+- worker automatically reinitializes after 1.5 seconds so a fresh QR can be generated
+
+### 8.5 Post-login restart required
+
+Baileys often emits `515` immediately after a fresh login. The code treats this as expected handover when it happens shortly after `isNewLogin`.
+
+Behavior:
+
+- state is set to `CONNECTING`
+- a `CONNECTING` status event is published
+- the socket is restarted without clearing session files
+- reinitialization happens after 1.5 seconds
+
+### 8.6 Recoverable disconnects
+
+The worker preserves the existing auth session for reconnect attempts unless the client explicitly logged out (`401`) or the retry cap is exceeded. Status codes `405`, `408`, and `428` are treated as known transport-level recoverable disconnects.
+
+Behavior:
+
+- state becomes `DISCONNECTED`
+- a `DISCONNECTED` status event is published
+- the session is preserved
+- reconnect delay is `min(15000 * attempt, 120000)` milliseconds
+
+This avoids unnecessary QR churn during transient failures.
+
+### 8.7 Other disconnects
+
+For other disconnects:
+
+- state becomes `DISCONNECTED`
+- a `DISCONNECTED` status event is published
+- the session is preserved
+- reconnect delay is `min(3000 * attempt, 30000)` milliseconds
+
+### 8.8 Retry cap
+
+If reconnect attempts exceed 8:
+
+- the worker keeps the existing session
+- the state remains in the disconnect/retry path
+- reconnect attempts continue with capped backoff
+- no QR reset is forced purely because the retry counter grew
+
+### 8.9 Stop, restart, delete
+
+`restartClient(clientId, { resetSession })`
+
+- stops sender loop
+- drops current socket
+- optionally clears session
+- sets state `CONNECTING`
+- publishes `CONNECTING`
+- immediately calls `initClient`
+
+`stopClient(clientId, { resetSession })`
+
+- marks client as stopped
+- stops sender loop
+- drops current socket
+- optionally clears session
+- sets state `STOPPED`
+- publishes `STOPPED`
+- does not auto-reconnect
+
+`deleteClient(clientId)`
+
+- marks client as stopped
+- stops sender loop
+- drops current socket
+- deletes `wa:qr:<clientId>`
+- deletes `wa:pending:<clientId>`
+- removes the client from `wa:clients:state`
+- clears session files
+- publishes a `DELETED` status event
+
+## 9) Outbound Queue Contract
+
+This is the most important behavioral contract in the system.
+
+### 9.1 Enqueue behavior
+
+`POST /messages/send` does not send directly. It only validates and enqueues.
+
+The API writes this shape into `wa:pending:<clientId>`:
+
+```json
+{
+  "type": "SEND_MESSAGE",
+  "clientId": "client-1",
+  "phoneNumber": "9999999999",
+  "text": "hello",
+  "files": []
+}
+```
+
+Validation rules in `api/routes/messages.js`:
+
+- `clientId` must be a non-empty string
+- `phoneNumber` must be present
+- `files` must be an array
+- every file must contain non-empty `file_url` and `mimeType`
+- at least one of `text` or `files[]` must be present
+- text is trimmed before enqueueing
+
+### 9.2 Dequeue behavior
+
+The worker sender loop in `worker/socketManager.js`:
+
+- starts only once per client
+- does not dequeue anything while the client is disconnected or missing
+- blocks on `BRPOP wa:pending:<clientId>` only when the socket is present and marked connected
+- processes one queue item at a time
+
+This means messages can safely be queued before a client has ever connected.
+
+### 9.3 Retry behavior
+
+If sending fails after dequeue:
+
+- the raw job is pushed back to the same queue using `RPUSH`
+- the worker sleeps for 3 seconds
+- the item is retried later
+
+The queue currently has:
+
+- requeue-on-failure
+- no explicit retry counter
+- no outbound DLQ
+
+### 9.4 Send-delay behavior
+
+Runtime delay config is read from `wa:config:sendDelay`.
+
+Normalization rules used by both API and worker:
+
+- minimum allowed delay: `500ms`
+- maximum allowed delay: `120000ms`
+- if config is missing, malformed, or invalid, fallback is `3000-8000ms`
+
+After each successful send, the worker sleeps for a random value between `minMs` and `maxMs`.
+
+### 9.5 Queue ordering note
+
+The code currently uses:
+
+- `LPUSH` when enqueueing
+- `BRPOP` when consuming
+
+That gives FIFO behavior for newly queued jobs. Failed sends are reinserted with `RPUSH`, which keeps the failed item as the next item retried for that client.
+
+## 10) Media Send Behavior
+
+Implemented in `worker/mediaSender.js`.
+
+Rules:
+
+- text-only payloads send as `{ text }`
+- one image or video can carry the text as a caption
+- one document or audio file is sent first; if text exists and cannot be captioned, text is sent as a second message
+- multiple files are sent one-by-one, then trailing text is sent afterward
+
+Media type handling:
+
+- `image/*` -> `image`
+- `video/*` -> `video`
+- `audio/*` -> `audio`
+- everything else -> `document`
+
+Validation safeguards:
+
+- missing or invalid `file_url` throws an error before send
+
+Phone normalization detail:
+
+- sender loop converts a bare phone number into `91<phone>@s.whatsapp.net`
+- if the phone already contains `@s.whatsapp.net`, it is used as-is
+
+This is an important implementation assumption: the current worker defaults bare numbers to the India country code `91`.
+
+## 11) Realtime Event Flow
+
+### 11.1 Worker publishes
+
+Worker publishes events to Redis Stream `wa:events:stream` as:
+
+- stream fields: `data`, `JSON.stringify(event)`
+
+Common event shapes:
+
+- `{ type: "qr", clientId, qr }`
+- `{ type: "status", clientId, state }`
+- `{ type: "test", clientId, message, timestamp }`
+
+### 11.2 API consumes
+
+`api/streamConsumer.js`:
+
+- uses consumer group `api-consumers`
+- uses a unique consumer name per process
+- creates the group with `MKSTREAM` if needed
+- processes own pending entries first
+- then runs `XAUTOCLAIM` recovery for stale pending entries
+- then blocks for new entries
+
+### 11.3 Validation and ack
+
+An event is considered valid only if:
+
+- the stream message contains a `data` field
+- `data` parses as JSON
+- the parsed object contains both `clientId` and `type`
+
+Successful processing:
+
+- broadcast through `wsHub`
+- `XACK` the message
+
+Failed processing:
+
+- failure count is tracked in-memory per message ID
+- after `WA_EVENTS_POISON_THRESHOLD` attempts, message is copied to DLQ
+- the original message is then acknowledged
+
+Default stream consumer environment knobs:
+
+- `WA_EVENTS_DLQ_STREAM=wa:events:dlq`
+- `WA_EVENTS_POISON_THRESHOLD=5`
+- `WA_EVENTS_AUTOCLAIM_MIN_IDLE_MS=60000`
+- `WA_EVENTS_AUTOCLAIM_BATCH_SIZE=50`
+
+Important limitation:
+
+- poison attempt counters are in-memory, so they reset if the API process restarts
+
+## 12) WebSocket Model
+
+Implemented by:
+
+- `api/routes/ws.js`
+- `api/wsHub.js`
+
+Behavior:
+
+- WebSocket endpoint is `GET /ws`
+- the first inbound message must include `clientId`
+- first message may be a normal message or a ping
+- once registered, the socket is associated with that `clientId`
+- registration triggers an immediate snapshot push:
+  - current status from `wa:clients:state`
+  - current QR from `wa:qr:<clientId>`, if present
+
+Ping handling:
+
+```json
+{ "clientId": "client-1", "type": "ping" }
+```
+
+Pong reply:
+
+```json
+{ "type": "pong", "timestamp": 1710000000000 }
+```
+
+Broadcast model:
+
+- `wsHub` stores `clientId -> Set<WebSocket>`
+- broadcasts go only to sockets registered for that same `clientId`
+- sockets are removed from the registry on `close`
+
+## 13) REST API
+
+### 13.1 Health
+
+- `GET /health`
+  - returns `{ status: "ok" }`
+
+### 13.2 Client lifecycle
 
 - `GET /clients`
-- `GET /config/send-delay`
-- `POST /config/send-delay` body `{ minMs, maxMs }`
-- `POST /clients/:clientId`
-  - validates `clientId` format
-  - returns `409` if already exists (no state reset)
-- `POST /clients/:clientId/reconnect`
-  - allowed states: `LOGGED_OUT | DISCONNECTED | STOPPED`
-- `POST /clients/:clientId/restart` body `{ resetSession?: boolean }`
-- `POST /clients/:clientId/stop` body `{ resetSession?: boolean }`
-- `DELETE /clients/:clientId`
-- `GET /clients/:clientId/status`
+  - returns raw `wa:clients:state` hash
 
-### 5.3 Queue operations
+- `POST /clients/:clientId`
+  - validates `clientId` with `^[a-zA-Z0-9._:-]{1,120}$`
+  - returns `409` if client already exists
+  - writes `CREATED` and queues `ADD_CLIENT`
+
+- `POST /clients/:clientId/reconnect`
+  - allowed only from `LOGGED_OUT`, `DISCONNECTED`, or `STOPPED`
+  - queues `ADD_CLIENT`
+
+- `POST /clients/:clientId/restart`
+  - body: `{ resetSession?: boolean }`
+  - queues `RESTART_CLIENT`
+
+- `POST /clients/:clientId/stop`
+  - body: `{ resetSession?: boolean }`
+  - queues `STOP_CLIENT`
+
+- `DELETE /clients/:clientId`
+  - queues `DELETE_CLIENT`
+
+- `GET /clients/:clientId/status`
+  - returns `{ state: "<STATE>" }` if known
+  - returns `{ clientId, state: "NON_EXISTENT" }` if missing
+
+### 13.3 Send-delay config
+
+- `GET /config/send-delay`
+  - returns active config and source:
+    `{ minMs, maxMs, source: "default" | "redis" }`
+
+- `POST /config/send-delay`
+  - body: `{ minMs, maxMs }`
+  - validates integer bounds
+  - returns `400` on invalid ranges
+  - stores normalized values in Redis
+
+### 13.4 Queue
 
 - `POST /messages/send`
-  - required: `clientId`, `phoneNumber`
-  - requires non-empty text and/or valid `files[]`
-  - file validation: each file needs `file_url` + `mimeType`
+  - validates and enqueues outbound jobs
+
 - `GET /clients/:clientId/queue?limit=<1..200>`
-  - returns total + parsed/raw queued entries
+  - returns:
+    - `clientId`
+    - `total`
+    - `returned`
+    - `limit`
+    - `messages`
+  - each `messages[]` row includes:
+    - `index`
+    - `raw`
+    - `parsed` or `null`
+
 - `DELETE /clients/:clientId/queue`
-  - clears pending queue for that client
+  - deletes the Redis list for that client
+  - returns how many items were cleared
 
-### 5.4 WebSocket
-
-- `GET /ws` (upgrade)
-- first inbound message must include `clientId` (ping message also works)
-- ping format: `{ "clientId": "...", "type": "ping" }`
-- replies with pong: `{ "type": "pong", "timestamp": <ms> }`
-- sends current status immediately after registration
-- sends QR payload if available in Redis
-
-### 5.5 Debug
+### 13.5 Debug
 
 - `GET /debug/ws-stats`
 - `GET /debug/client-states`
 - `GET /debug/active-clients`
-- `POST /debug/test-broadcast/:clientId` (writes test event to stream)
+- `POST /debug/test-broadcast/:clientId`
 - `GET /debug/qr/:clientId`
 - `GET /debug/pending/:clientId`
 
-## 6) Stream Consumer Reliability (`api/streamConsumer.js`)
+These endpoints are operational/debug tooling, not hardened admin APIs.
 
-- Uses Redis consumer group `api-consumers` on `wa:events:stream`.
-- Validates stream event shape (`clientId`, `type`).
-- Ack on successful processing.
-- Tracks per-message failures in-memory.
-- Moves poison messages to DLQ stream after threshold.
-- Uses `XAUTOCLAIM` to recover stale pending entries from dead consumers.
+## 14) Dashboard Behavior
 
-Environment knobs:
+The React dashboard in `dashboard/src/App.jsx` is a polling admin UI with queue tools and log access.
 
-- `WA_EVENTS_DLQ_STREAM` (default `wa:events:dlq`)
-- `WA_EVENTS_POISON_THRESHOLD` (default `5`)
-- `WA_EVENTS_AUTOCLAIM_MIN_IDLE_MS` (default `60000`)
-- `WA_EVENTS_AUTOCLAIM_BATCH_SIZE` (default `50`)
+It currently supports:
 
-## 7) Dashboard (Operations UI)
+- manual API base URL entry, stored in localStorage
+- client creation
+- reconnect, restart, reset+restart
+- stop, reset+stop
+- delete
+- queue inspection for known clients
+- manual queue lookup by arbitrary `clientId`
+- queue clear by row action or manual lookup
+- send-delay view/edit
+- simple text-message enqueue form
+- overview counters:
+  - known clients
+  - active sockets
+  - websocket connections
+- log tailing for `worker`, `api`, `redis`, `dashboard`
 
-Dashboard runs on `:8080` with basic auth (`DASH_USER`, `DASH_PASS`).
+Polling behavior:
 
-Capabilities:
+- refreshes debug data every 5 seconds
 
-- create/reconnect/restart/stop/delete clients
-- monitor states, active sockets, websocket fanout counts
-- view container stdout logs (`worker`, `api`, `redis`, `dashboard`)
-- queue tools:
-  - per-client `View Queue` and `Clear Queue`
-  - manual queue lookup/clear for any `clientId` (including non-initialized clients)
-  - global send-delay controls backed by Redis runtime config
+Operational UX contract already assumed in the repo:
 
-## 8) Docker Compose Notes
+- client row is the primary control area
+- no duplicate bottom action block
+- queue panel supports arbitrary `clientId` lookup, even for clients not created yet
 
-`docker-compose.yaml` includes `redis`, `worker`, `api`, `proxy`, and `dashboard`.
+## 15) Docker Compose Defaults
 
-Important current defaults:
+Current `docker-compose.yaml` defines:
 
-- `proxy` terminates TLS on host port `443` using `nginx/certs/origin.crt` and `nginx/certs/origin.key`.
-- `api` remains internal on Docker port `3000`; HTTPS and WSS traffic should enter through `proxy`.
-- Redis persistence disabled (`--save ""`, `--appendonly no`) -> data is ephemeral on restart
-- Worker logs configured via:
+- `redis`
+- `worker`
+- `api`
+- `proxy`
+- `dashboard`
+
+Defaults worth knowing:
+
+- Redis persistence is disabled:
+  - `--save ""`
+  - `--appendonly no`
+- worker mounts:
+  - `./sessions:/sessions`
+  - `./logs:/logs`
+- dashboard mounts:
+  - `/var/run/docker.sock:/var/run/docker.sock`
+- external ports:
+  - `6379` for Redis
+  - `443` for Nginx proxy
+  - `8080` for dashboard
+
+Current compose environment highlights:
+
+- worker:
+  - `WA_DEVICE_NAME`
+  - `WA_DEVICE_PLATFORM`
+  - `WA_DEVICE_VERSION`
   - `LOG_LEVEL`
   - `CLIENT_LOG_LEVEL`
-  - `LOG_CLIENTS_DIR=/logs/clients`
-  - `SCRUB_SIGNAL_LOGS=true`
+  - `LOG_CLIENTS_DIR`
+  - `SCRUB_SIGNAL_LOGS`
 
-Certificate setup:
+- api:
+  - `LOG_LEVEL`
+  - `API_LOG_LEVEL`
 
-1. Put your Cloudflare Origin CA certificate at `nginx/certs/origin.crt`
-2. Put the private key at `nginx/certs/origin.key`
-3. Recreate the proxy service:
+- dashboard:
+  - `DASH_USER`
+  - `DASH_PASS`
+  - `DASH_PORT`
 
-```bash
-docker compose up -d --force-recreate proxy api
-```
+## 16) TLS / Proxy Setup
 
-4. Keep Cloudflare SSL/TLS mode on `Full` or `Full (strict)`
+The proxy expects these files:
 
-Create the files directly on the EC2 instance:
-
-```bash
-mkdir -p nginx/certs
-nano nginx/certs/origin.crt
-```
-
-Paste the full Cloudflare Origin Certificate content, save, then create the key:
-
-```bash
-nano nginx/certs/origin.key
-```
-
-Paste the full private key content and save.
-
-If you prefer shell redirection instead of an editor:
-
-```bash
-cat > nginx/certs/origin.crt <<'EOF'
------BEGIN CERTIFICATE-----
-PASTE_YOUR_CLOUDFLARE_ORIGIN_CERTIFICATE_HERE
------END CERTIFICATE-----
-EOF
-```
-
-```bash
-cat > nginx/certs/origin.key <<'EOF'
------BEGIN PRIVATE KEY-----
-PASTE_YOUR_PRIVATE_KEY_HERE
------END PRIVATE KEY-----
-EOF
-```
+- `nginx/certs/origin.crt`
+- `nginx/certs/origin.key`
 
 Recommended permissions:
 
@@ -262,31 +716,90 @@ chmod 600 nginx/certs/origin.key
 chmod 644 nginx/certs/origin.crt
 ```
 
-Verify the files exist before restarting:
+Typical restart after cert updates:
 
 ```bash
-ls -l nginx/certs
+docker compose up -d --force-recreate proxy api
 ```
 
-## 9) Known Gaps
+## 17) Testing Surface
 
-- API and WS endpoints are unauthenticated; CORS is permissive.
-- Redis host is still hardcoded to `redis` in multiple worker/api modules.
-- Outbound queue has requeue-on-failure but no explicit retry counter / outbound DLQ.
-## 10) Quick Commands
+Current automated tests live in:
 
-Create client:
+- `api/tests/clients.routes.test.js`
+- `api/tests/messages.routes.test.js`
+- `api/tests/streamConsumer.test.js`
+- `worker/tests/socketManager.test.js`
+
+What is covered today:
+
+- send-delay defaults, normalization, and validation
+- client creation and duplicate handling
+- reconnect state gatekeeping
+- queue inspection and clearing endpoints
+- message enqueue validation
+- stream message validation, ack, and DLQ handling
+- disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap session persistence, and sender-loop requeue behavior
+- reconnect-cap recovery
+- sender-loop requeue-on-send-failure behavior
+
+How to run tests:
+
+```bash
+cd api && npm test
+```
+
+```bash
+cd worker && npm test
+```
+
+## 18) Files To Read Before Changing Behavior
+
+If you are changing lifecycle, queues, or realtime behavior, read these first:
+
+1. `worker/socketManager.js`
+2. `worker/mediaSender.js`
+3. `api/streamConsumer.js`
+4. `api/routes/clients.js`
+5. `api/routes/messages.js`
+6. `api/routes/ws.js`
+7. `api/wsHub.js`
+8. `dashboard/src/App.jsx`
+9. `api/tests/*.test.js`
+10. `worker/tests/*.test.js`
+
+## 19) Known Gaps and Risks
+
+These are current realities, not future tasks:
+
+- API and WebSocket endpoints are unauthenticated
+- API CORS is permissive
+- Redis host is hardcoded to `redis` in several modules
+- Redis data is ephemeral under current compose defaults
+- outbound queue has no retry counter and no outbound DLQ
+- poison message tracking in the stream consumer is in-memory only
+- bare phone numbers are normalized to India prefix `91`
+
+## 20) Common Operations
+
+Create a client:
 
 ```bash
 curl -k -X POST https://localhost/clients/client-1
 ```
 
-Queue text:
+Queue a text message:
 
 ```bash
 curl -k -X POST https://localhost/messages/send \
   -H "content-type: application/json" \
-  -d '{"clientId":"client-1","phoneNumber":"9876543210","text":"hello"}'
+  -d '{"clientId":"client-1","phoneNumber":"9999999999","text":"hello"}'
+```
+
+Check client status:
+
+```bash
+curl -k https://localhost/clients/client-1/status
 ```
 
 View queue:
@@ -301,8 +814,14 @@ Clear queue:
 curl -k -X DELETE "https://localhost/clients/client-1/queue"
 ```
 
-Check status:
+## 21) Change Rules For Future Work
 
-```bash
-curl -k https://localhost/clients/client-1/status
-```
+If you change queue, state, or event behavior:
+
+- update focused tests in the same change
+- keep this README aligned with the code
+- do not silently change the dequeue-while-disconnected contract
+- do not silently remove requeue-on-send-failure behavior
+- do not silently alter reconnect semantics for `401`, ordinary disconnect retries, `405`, `408`, `428`, or retry-cap session persistence
+
+This repository relies on those behaviors operationally.
