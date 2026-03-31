@@ -83,6 +83,7 @@ Think of the codebase in terms of three flows:
 Primary files:
 
 - `worker/index.js`
+- `worker/startupRehydrate.js`
 - `worker/commandListener.js`
 - `worker/socketManager.js`
 - `worker/mediaSender.js`
@@ -101,6 +102,7 @@ Important implementation details:
 - session files are stored under `/sessions/<clientId>`
 - state is written to Redis hash `wa:clients:state`
 - active worker-owned sockets are mirrored in Redis set `wa:clients:active`
+- worker startup rehydrates clients from Redis state plus persisted `/sessions` folders, skipping `STOPPED` and `LOGGED_OUT`
 - one dedicated Redis connection is used per sender loop because `BRPOP` is blocking
 - a separate Redis publisher connection is used for stream publishing to reduce interference with other worker operations
 
@@ -245,6 +247,18 @@ This section mirrors `worker/socketManager.js`.
 6. Worker sets state to `CONNECTING`.
 7. Worker loads or creates auth state from `/sessions/<clientId>`.
 8. Worker fetches the latest Baileys WhatsApp version at startup of that socket.
+
+### 8.1.1 Worker startup rehydration
+
+On worker process startup:
+
+- the worker reads `wa:clients:state`
+- the worker scans `/sessions` for persisted session folders
+- it builds the union of those client IDs
+- it skips clients currently marked `STOPPED` or `LOGGED_OUT`
+- it calls `initClient()` for the remaining clients
+
+This allows sockets to come back after worker or Redis restarts without requiring a manual dashboard restart for each client.
 
 ### 8.2 QR issuance
 
@@ -669,9 +683,11 @@ Current `docker-compose.yaml` defines:
 
 Defaults worth knowing:
 
-- Redis persistence is disabled:
-  - `--save ""`
-  - `--appendonly no`
+- Redis persistence is enabled with:
+  - `--save 60 1000`
+  - `--appendonly yes`
+  - `--appendfsync everysec`
+- Redis data is stored in the named Docker volume `redis-data`
 - worker mounts:
   - `./sessions:/sessions`
   - `./logs:/logs`
@@ -730,6 +746,7 @@ Current automated tests live in:
 - `api/tests/messages.routes.test.js`
 - `api/tests/streamConsumer.test.js`
 - `worker/tests/socketManager.test.js`
+- `worker/tests/startupRehydrate.test.js`
 
 What is covered today:
 
@@ -740,7 +757,7 @@ What is covered today:
 - message enqueue validation
 - stream message validation, ack, and DLQ handling
 - disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap session persistence, and sender-loop requeue behavior
-- reconnect-cap recovery
+- worker startup rehydration from Redis state and session folders
 - sender-loop requeue-on-send-failure behavior
 
 How to run tests:
@@ -758,15 +775,16 @@ cd worker && npm test
 If you are changing lifecycle, queues, or realtime behavior, read these first:
 
 1. `worker/socketManager.js`
-2. `worker/mediaSender.js`
-3. `api/streamConsumer.js`
-4. `api/routes/clients.js`
-5. `api/routes/messages.js`
-6. `api/routes/ws.js`
-7. `api/wsHub.js`
-8. `dashboard/src/App.jsx`
-9. `api/tests/*.test.js`
-10. `worker/tests/*.test.js`
+2. `worker/startupRehydrate.js`
+3. `worker/mediaSender.js`
+4. `api/streamConsumer.js`
+5. `api/routes/clients.js`
+6. `api/routes/messages.js`
+7. `api/routes/ws.js`
+8. `api/wsHub.js`
+9. `dashboard/src/App.jsx`
+10. `api/tests/*.test.js`
+11. `worker/tests/*.test.js`
 
 ## 19) Known Gaps and Risks
 
@@ -775,7 +793,6 @@ These are current realities, not future tasks:
 - API and WebSocket endpoints are unauthenticated
 - API CORS is permissive
 - Redis host is hardcoded to `redis` in several modules
-- Redis data is ephemeral under current compose defaults
 - outbound queue has no retry counter and no outbound DLQ
 - poison message tracking in the stream consumer is in-memory only
 - bare phone numbers are normalized to India prefix `91`

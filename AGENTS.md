@@ -98,6 +98,7 @@ Current states in Redis hash `wa:clients:state`:
 Important transitions:
 
 - `POST /clients/:clientId` sets up logical client and enqueues `ADD_CLIENT`
+- worker startup should rehydrate non-`STOPPED`, non-`LOGGED_OUT` clients from Redis state and persisted session folders
 - `401`/logout -> `LOGGED_OUT` + session clear + auto reinit
 - ordinary disconnects should preserve the existing session during reconnect attempts; `405`/`408`/`428` are known transport-recoverable examples and use the slower backoff path
 - repeated `DISCONNECTED` beyond retry cap -> continue reconnect attempts with the existing session; do not force session clear
@@ -160,13 +161,14 @@ Important transitions:
 ## Files to Review First Before Any Change
 
 1. `worker/socketManager.js`
-2. `worker/mediaSender.js`
-3. `api/streamConsumer.js`
-4. `api/routes/clients.js`
-5. `api/routes/messages.js`
-6. `dashboard/src/App.jsx`
-7. `api/tests/*.test.js`
-8. `worker/tests/*.test.js`
+2. `worker/startupRehydrate.js`
+3. `worker/mediaSender.js`
+4. `api/streamConsumer.js`
+5. `api/routes/clients.js`
+6. `api/routes/messages.js`
+7. `dashboard/src/App.jsx`
+8. `api/tests/*.test.js`
+9. `worker/tests/*.test.js`
 
 ---
 
@@ -188,7 +190,7 @@ When changing queue/state/event behavior:
 - Current automated coverage includes:
   - API config, client, queue, and message validation routes
   - stream consumer payload validation, ack flow, and DLQ handling
-  - worker disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap persistence, and sender-loop requeue behavior
+  - worker disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap persistence, sender-loop requeue behavior, and startup rehydration
 - Prefer adding focused tests beside the changed surface before expanding broader integration coverage.
 
 ---
@@ -196,6 +198,5 @@ When changing queue/state/event behavior:
 ## Current Known Risks (for planning)
 
 - API/WS authentication is not implemented.
-- Redis persistence is disabled in compose defaults.
 - Redis host config is hardcoded in several modules.
 - Outbound queue has requeue-on-failure but no retry cap/outbound DLQ.

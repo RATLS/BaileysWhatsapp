@@ -46,17 +46,13 @@ if (process.env.SCRUB_SIGNAL_LOGS === "true") {
 }
 
 const { startCommandListener } = require("./commandListener")
+const { rehydrateClients } = require("./startupRehydrate")
 const { info, error } = require("./logger")
 
 async function start() {
   info("🚀 WhatsApp worker starting...")
 
-  // Optional preload (can remove later)
-  // await initClient("client-1")
-
-//   for (let i = 0; i <= 200; i++) {
-//   await initClient(`client-${i}`);
-// }
+  await rehydrateClients()
 
   startCommandListener()
 
