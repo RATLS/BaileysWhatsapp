@@ -312,7 +312,7 @@ test("failed send is logged with status failed and failReason before re-queueing
 
   const entry = JSON.parse(zaddCalls[0].member)
   assert.equal(entry.status, "failed")
-  assert.equal(entry.phoneNumber, "9999999999")
+  assert.equal(entry.phoneNumber, "919999999999")
   assert.equal(entry.text, "hello")
   assert.equal(entry.fileCount, 0)
   assert.equal(typeof entry.failReason, "string")
@@ -357,7 +357,7 @@ test("successful send is logged with status sent", async (t) => {
 
   const entry = JSON.parse(zaddCalls[0].member)
   assert.equal(entry.status, "sent")
-  assert.equal(entry.phoneNumber, "9999999999")
+  assert.equal(entry.phoneNumber, "919999999999")
   assert.equal(entry.text, "hello")
   assert.equal(entry.fileCount, 0)
   assert.equal(entry.failReason, undefined)

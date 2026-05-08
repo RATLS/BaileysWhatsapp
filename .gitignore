@@ -2,3 +2,4 @@ sessions/
 nginx/certs/*
 !nginx/certs/.gitkeep
 api/node_modules/
+worker/node_modules/

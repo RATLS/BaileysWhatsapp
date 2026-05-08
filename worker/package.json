@@ -8,6 +8,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "pino": "^8.17.0",
-    "ioredis":"5.3.2"
+    "ioredis":"5.3.2",
+    "libphonenumber-js": "^1.11.0"
   }
 }

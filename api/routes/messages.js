@@ -1,4 +1,5 @@
 const redis = require("../redis")
+const { normalizePhoneNumber } = require("../phone")
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0
@@ -22,6 +23,11 @@ module.exports = async function (fastify) {
       return res.code(400).send({ error: "Missing fields" })
     }
 
+    const phoneResult = normalizePhoneNumber(phoneNumber)
+    if (!phoneResult.ok) {
+      return res.code(400).send({ error: phoneResult.error })
+    }
+
     if (!Array.isArray(files)) {
       return res.code(400).send({ error: "files must be an array" })
     }
@@ -42,7 +48,7 @@ module.exports = async function (fastify) {
       JSON.stringify({
         type: "SEND_MESSAGE",
         clientId,
-        phoneNumber,
+        phoneNumber: phoneResult.e164,
         text: trimmedText,
         files
       })

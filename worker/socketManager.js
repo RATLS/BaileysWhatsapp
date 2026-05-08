@@ -7,6 +7,7 @@ const { STATES, setClientState, removeClientState } = require("./clientState")
 const Redis = require("ioredis")
 const { sendMessageWithMedia } = require("./mediaSender")
 const { info, warn, error, clientLog } = require("./logger")
+const { toJid } = require("./phone")
 
 const WA_DEVICE_NAME = process.env.WA_DEVICE_NAME || "Admissions - CRM"
 const WA_DEVICE_PLATFORM = process.env.WA_DEVICE_PLATFORM || "Linux"
@@ -486,17 +487,27 @@ async function startSenderLoop(clientId) {
       const raw = res[1]
       const payload = JSON.parse(raw)
 
-      const phone = payload.phoneNumber.toString()
-
-      const jid = phone.includes("@s.whatsapp.net")
-        ? phone
-        : `91${phone}@s.whatsapp.net`
+      const jidResult = toJid(payload.phoneNumber)
+      if (!jidResult.ok) {
+        await logMessage(clientId, {
+          phoneNumber: String(payload.phoneNumber ?? ""),
+          sentAt: Date.now(),
+          status: "failed",
+          text: payload.text || null,
+          fileCount: Array.isArray(payload.files) ? payload.files.length : 0,
+          failReason: jidResult.error
+        })
+        clientLog(clientId, "error", `❌ Invalid phoneNumber, dropping: ${jidResult.error} (${payload.phoneNumber})`)
+        continue
+      }
+      const jid = jidResult.jid
+      const loggedNumber = jidResult.e164 || String(payload.phoneNumber)
 
       try {
         await sendMessageWithMedia(sock, jid, payload)
-        clientLog(clientId, "info", `sent -> ${payload.phoneNumber}`)
+        clientLog(clientId, "info", `sent -> ${loggedNumber}`)
         await logMessage(clientId, {
-          phoneNumber: String(payload.phoneNumber),
+          phoneNumber: loggedNumber,
           sentAt: Date.now(),
           status: "sent",
           text: payload.text || null,
@@ -504,7 +515,7 @@ async function startSenderLoop(clientId) {
         })
       } catch (sendErr) {
         await logMessage(clientId, {
-          phoneNumber: String(payload.phoneNumber),
+          phoneNumber: loggedNumber,
           sentAt: Date.now(),
           status: "failed",
           text: payload.text || null,

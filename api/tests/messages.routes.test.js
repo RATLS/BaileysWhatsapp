@@ -53,10 +53,99 @@ test("POST /messages/send queues trimmed text messages", async (t) => {
   assert.deepEqual(JSON.parse(rows[0]), {
     type: "SEND_MESSAGE",
     clientId: "client-1",
-    phoneNumber: "9999999999",
+    phoneNumber: "919999999999",
     text: "hello",
     files: []
   })
+})
+
+test("POST /messages/send accepts international numbers and queues E.164", async (t) => {
+  const redis = createRedisMock()
+  const { app, modulePath } = await buildApp(redis)
+  t.after(async () => {
+    await app.close()
+    clearModule(modulePath)
+  })
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/messages/send",
+    payload: {
+      clientId: "client-uk",
+      phoneNumber: "447598328056",
+      text: "hi"
+    }
+  })
+
+  assert.equal(res.statusCode, 200)
+  const rows = await redis.lrange("wa:pending:client-uk", 0, 10)
+  assert.equal(JSON.parse(rows[0]).phoneNumber, "447598328056")
+})
+
+test("POST /messages/send sanitizes formatting and respects existing country code", async (t) => {
+  const redis = createRedisMock()
+  const { app, modulePath } = await buildApp(redis)
+  t.after(async () => {
+    await app.close()
+    clearModule(modulePath)
+  })
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/messages/send",
+    payload: {
+      clientId: "client-fmt",
+      phoneNumber: "+91 96996-05540",
+      text: "hi"
+    }
+  })
+
+  assert.equal(res.statusCode, 200)
+  const rows = await redis.lrange("wa:pending:client-fmt", 0, 10)
+  assert.equal(JSON.parse(rows[0]).phoneNumber, "919699605540")
+})
+
+test("POST /messages/send rejects invalid phone numbers with 400", async (t) => {
+  const redis = createRedisMock()
+  const { app, modulePath } = await buildApp(redis)
+  t.after(async () => {
+    await app.close()
+    clearModule(modulePath)
+  })
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/messages/send",
+    payload: {
+      clientId: "client-bad",
+      phoneNumber: "abc123",
+      text: "hi"
+    }
+  })
+
+  assert.equal(res.statusCode, 400)
+  assert.match(res.json().error, /phoneNumber/)
+})
+
+test("POST /messages/send rejects too-short numbers with 400", async (t) => {
+  const redis = createRedisMock()
+  const { app, modulePath } = await buildApp(redis)
+  t.after(async () => {
+    await app.close()
+    clearModule(modulePath)
+  })
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/messages/send",
+    payload: {
+      clientId: "client-short",
+      phoneNumber: "12345",
+      text: "hi"
+    }
+  })
+
+  assert.equal(res.statusCode, 400)
 })
 
 test("POST /messages/send queues file-only messages", async (t) => {
