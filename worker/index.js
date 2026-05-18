@@ -83,10 +83,17 @@ if (process.env.SCRUB_SIGNAL_LOGS === "true") {
   }
 }
 
+const fs = require("fs")
 const { startCommandListener } = require("./commandListener")
 const { rehydrateClients } = require("./startupRehydrate")
 const { reassertClientStates } = require("./socketManager")
 const { info, error } = require("./logger")
+
+const HEARTBEAT_FILE = "/tmp/worker-heartbeat"
+
+function beat() {
+  try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())) } catch {}
+}
 
 async function start() {
   info("🚀 WhatsApp worker starting...")
@@ -95,9 +102,15 @@ async function start() {
 
   startCommandListener()
 
+  // Liveness heartbeat: the Docker HEALTHCHECK fails if this file goes stale,
+  // so a crash-loop (e.g. a bad node flag aborting start) surfaces as
+  // "unhealthy" instead of silently restarting forever.
+  beat()
+
   // Periodically re-assert wa:clients:state so the dashboard self-heals if
   // Redis ever loses that hash without a worker restart. Doubles as keepalive.
   setInterval(() => {
+    beat()
     reassertClientStates().catch(() => {})
   }, 30_000)
 }

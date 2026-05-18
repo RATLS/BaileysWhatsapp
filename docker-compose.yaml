@@ -39,7 +39,6 @@ services:
       CLIENT_LOG_LEVEL: "info"
       LOG_CLIENTS_DIR: "/logs/clients"
       SCRUB_SIGNAL_LOGS: "true"
-      NODE_OPTIONS: "--max-old-space-size=512 --optimize-for-size"
     volumes:
       - ./sessions:/sessions
       - ./logs:/logs
