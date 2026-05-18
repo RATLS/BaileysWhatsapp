@@ -52,11 +52,15 @@ module.exports = async function (fastify) {
 
         // Handle ping messages
         if (data.type === 'ping') {
-          // Optional: Send pong response
           socket.send(JSON.stringify({
             type: 'pong',
             timestamp: Date.now()
           }))
+          // Re-sync current status/QR on every heartbeat so the connection
+          // self-heals against any dropped broadcast.
+          if (!justRegistered) {
+            await sendClientSnapshot(socket, clientId)
+          }
           return
         }
 

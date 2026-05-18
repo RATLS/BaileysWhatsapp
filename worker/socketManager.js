@@ -1,5 +1,13 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
-  require("@whiskeysockets/baileys")
+const {
+  makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  isJidGroup,
+  isJidBroadcast,
+  isJidNewsletter,
+  isJidStatusBroadcast
+} = require("@whiskeysockets/baileys")
 const Pino = require("pino")
 
 const { clearSession } = require("./sessionUtils")
@@ -59,22 +67,42 @@ async function ensurePublishConnection() {
   }
 }
 
-// Bounded FIFO cache used for msgRetryCounterCache in each Baileys socket.
-// Prevents unbounded growth of the default internal cache under high message volume.
+// Bounded FIFO cache satisfying Baileys' CacheStore contract (get/set/del/flushAll).
+// Used for msgRetryCounterCache, userDevicesCache, callOfferCache, mediaCache —
+// Baileys' defaults are unbounded NodeCache instances which leak per-recipient
+// device entries in a long-running send-only worker.
 class BoundedCache {
   constructor(maxSize = 500) {
     this._max = maxSize
     this._store = new Map()
   }
-  get(key) { return this._store.get(key) }
+  get(key) {
+    if (!this._store.has(key)) return undefined
+    const value = this._store.get(key)
+    this._store.delete(key)
+    this._store.set(key, value)
+    return value
+  }
   set(key, value) {
-    if (this._store.size >= this._max) {
+    if (this._store.has(key)) {
+      this._store.delete(key)
+    } else if (this._store.size >= this._max) {
       this._store.delete(this._store.keys().next().value)
     }
     this._store.set(key, value)
   }
   del(key) { this._store.delete(key) }
   flushAll() { this._store.clear() }
+}
+
+function shouldIgnoreJid(jid) {
+  if (!jid) return false
+  return (
+    isJidGroup(jid) ||
+    isJidBroadcast(jid) ||
+    isJidNewsletter(jid) ||
+    isJidStatusBroadcast(jid)
+  )
 }
 
 const sockets = new Map()
@@ -109,6 +137,24 @@ async function markInactive(clientId) {
   try {
     await redis.srem("wa:clients:active", clientId)
   } catch {}
+}
+
+// Last state written per client this process lifetime. Used to periodically
+// re-assert wa:clients:state into Redis so the dashboard self-heals if that
+// hash is ever lost (Redis restart/flush) without a worker restart.
+const clientStates = new Map()
+
+async function recordState(clientId, state) {
+  clientStates.set(clientId, state)
+  await setClientState(clientId, state)
+}
+
+async function reassertClientStates() {
+  for (const [clientId, state] of clientStates) {
+    try {
+      await setClientState(clientId, state)
+    } catch {}
+  }
 }
 
 function clearReconnectTimer(clientId) {
@@ -148,6 +194,7 @@ async function publishEvent(event) {
     const pubClient = await ensurePublishConnection()
     const publishPromise = pubClient.xadd(
       'wa:events:stream',
+      'MAXLEN', '~', 10000,
       '*',
       'data', JSON.stringify(event)
     )
@@ -174,6 +221,9 @@ async function logMessage(clientId, entry) {
     await redis.zadd(key, entry.sentAt, JSON.stringify(entry))
     const cutoff = Date.now() - MSGLOG_TTL_MS
     await redis.zremrangebyscore(key, '-inf', cutoff)
+    // Rolling key TTL so the whole zset is reclaimable on time and is the
+    // eviction victim under Redis volatile-lru (protects wa:clients:state).
+    await redis.pexpire(key, MSGLOG_TTL_MS)
   } catch (err) {
     warn(`⚠️ Failed to write message log for ${clientId}: ${err && err.message ? err.message : err}`)
   }
@@ -194,7 +244,7 @@ async function initClient(clientId) {
 
   try{
   // bootingClients.add(clientId)
-    await setClientState(clientId, STATES.CONNECTING)
+    await recordState(clientId, STATES.CONNECTING)
 
     const sessionPath = `/sessions/${clientId}`
 
@@ -206,8 +256,17 @@ async function initClient(clientId) {
       auth: state,
       logger: getOrCreateClientLogger(clientId),
       msgRetryCounterCache: new BoundedCache(500),
+      userDevicesCache: new BoundedCache(200),
+      callOfferCache: new BoundedCache(50),
+      mediaCache: new BoundedCache(50),
       printQRInTerminal: false,
       markOnlineOnConnect: false,
+      emitOwnEvents: false,
+      fireInitQueries: false,
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => false,
+      shouldIgnoreJid,
+      getMessage: async () => undefined,
       version,
       browser: [WA_DEVICE_NAME, WA_DEVICE_PLATFORM, WA_DEVICE_VERSION]
     })
@@ -226,7 +285,7 @@ async function initClient(clientId) {
       }
 
       if (qr) {
-        await setClientState(clientId, STATES.QR_REQUIRED)
+        await recordState(clientId, STATES.QR_REQUIRED)
         await redis.set(`wa:qr:${clientId}`, qr, "EX", 120)
         
         // Try to publish, retry once if fails
@@ -246,7 +305,7 @@ async function initClient(clientId) {
         reconnectAttempts.delete(clientId)
         recentNewLoginAt.delete(clientId)
 
-        await setClientState(clientId, STATES.CONNECTED)
+        await recordState(clientId, STATES.CONNECTED)
 
         await redis.del(`wa:qr:${clientId}`)
 
@@ -269,7 +328,7 @@ async function initClient(clientId) {
         connectedClients.delete(clientId)
 
         if (stoppedClients.has(clientId)) {
-          await setClientState(clientId, STATES.STOPPED)
+          await recordState(clientId, STATES.STOPPED)
           await publishEvent({
             type: "status",
             clientId,
@@ -293,7 +352,7 @@ async function initClient(clientId) {
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
           reconnectAttempts.delete(clientId)
           recentNewLoginAt.delete(clientId)
-          await setClientState(clientId, STATES.LOGGED_OUT)
+          await recordState(clientId, STATES.LOGGED_OUT)
 
           // Publish LOGGED_OUT event (won't throw on failure)
           const publishResult = await publishEvent({
@@ -322,7 +381,7 @@ async function initClient(clientId) {
         // Baileys often emits 515 ("restart required") right after QR scan/new login.
         // Treat this as an expected handover, not a hard disconnect.
         if (statusCode === 515 && sawRecentNewLogin) {
-          await setClientState(clientId, STATES.CONNECTING)
+          await recordState(clientId, STATES.CONNECTING)
           await publishEvent({
             type: "status",
             clientId,
@@ -340,7 +399,7 @@ async function initClient(clientId) {
 
         // 🌐 Disconnected: retry with backoff.
         // For recoverable transport failures, preserve session to avoid forced QR churn.
-        await setClientState(clientId, STATES.DISCONNECTED)
+        await recordState(clientId, STATES.DISCONNECTED)
         await publishEvent({
           type: "status",
           clientId,
@@ -568,7 +627,7 @@ async function restartClient(clientId, { resetSession = false } = {}) {
     clearSession(clientId)
   }
 
-  await setClientState(clientId, STATES.CONNECTING)
+  await recordState(clientId, STATES.CONNECTING)
   await publishEvent({
     type: "status",
     clientId,
@@ -593,7 +652,7 @@ async function stopClient(clientId, { resetSession = false } = {}) {
     clearSession(clientId)
   }
 
-  await setClientState(clientId, STATES.STOPPED)
+  await recordState(clientId, STATES.STOPPED)
   await publishEvent({
     type: "status",
     clientId,
@@ -618,6 +677,8 @@ async function deleteClient(clientId) {
     await removeClientState(clientId)
   } catch {}
 
+  clientStates.delete(clientId)
+
   clearSession(clientId)
   clientPinoLoggers.delete(clientId)
 
@@ -636,6 +697,7 @@ module.exports = {
   restartClient,
   stopClient,
   deleteClient,
+  reassertClientStates,
   _test: {
     resetState() {
       sockets.clear()
@@ -653,6 +715,7 @@ module.exports = {
       reconnectTimers.forEach((timer) => clearTimeout(timer))
       reconnectTimers.clear()
       clientPinoLoggers.clear()
+      clientStates.clear()
     },
     setConnectedSocket(clientId, sock) {
       sockets.set(clientId, sock)

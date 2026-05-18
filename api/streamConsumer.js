@@ -13,10 +13,14 @@ let redis = new Redis({
 // Configuration
 const STREAM_KEY = 'wa:events:stream'
 const CONSUMER_GROUP = 'api-consumers'
-const CONSUMER_NAME = `api-${process.pid}-${Date.now()}`
+// Stable name so a restarted API reclaims its own pending entries immediately
+// via processPendingMessages() instead of waiting for cross-consumer xautoclaim.
+// Safe: compose runs exactly one api container.
+const CONSUMER_NAME = process.env.WA_EVENTS_CONSUMER_NAME || "api-main"
 const DLQ_STREAM_KEY = process.env.WA_EVENTS_DLQ_STREAM || "wa:events:dlq"
 const POISON_THRESHOLD = Number(process.env.WA_EVENTS_POISON_THRESHOLD || 5)
-const AUTOCLAIM_MIN_IDLE_MS = Number(process.env.WA_EVENTS_AUTOCLAIM_MIN_IDLE_MS || 60000)
+const AUTOCLAIM_MIN_IDLE_MS = Number(process.env.WA_EVENTS_AUTOCLAIM_MIN_IDLE_MS || 10000)
+const AUTOCLAIM_INTERVAL_MS = Number(process.env.WA_EVENTS_AUTOCLAIM_INTERVAL_MS || 15000)
 const AUTOCLAIM_BATCH_SIZE = Number(process.env.WA_EVENTS_AUTOCLAIM_BATCH_SIZE || 50)
 
 let isConsuming = false
@@ -227,10 +231,19 @@ async function startConsumer() {
     
     info(`👂 Listening for new messages on stream: ${STREAM_KEY}`)
     isConsuming = true
-    
+
+    let lastAutoclaimAt = Date.now()
+
     // Main consumer loop
     while (consumerRunning) {
       try {
+        // Periodically reclaim entries left pending by a stalled/restarted
+        // consumer so events are never stuck until the next API restart.
+        if (Date.now() - lastAutoclaimAt >= AUTOCLAIM_INTERVAL_MS) {
+          await claimAndProcessStalePendingMessages()
+          lastAutoclaimAt = Date.now()
+        }
+
         const messages = await redis.xreadgroup(
           'GROUP', CONSUMER_GROUP, CONSUMER_NAME,
           'BLOCK', 1000,

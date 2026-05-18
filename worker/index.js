@@ -85,6 +85,7 @@ if (process.env.SCRUB_SIGNAL_LOGS === "true") {
 
 const { startCommandListener } = require("./commandListener")
 const { rehydrateClients } = require("./startupRehydrate")
+const { reassertClientStates } = require("./socketManager")
 const { info, error } = require("./logger")
 
 async function start() {
@@ -94,7 +95,11 @@ async function start() {
 
   startCommandListener()
 
-  setInterval(() => {}, 60_000)
+  // Periodically re-assert wa:clients:state so the dashboard self-heals if
+  // Redis ever loses that hash without a worker restart. Doubles as keepalive.
+  setInterval(() => {
+    reassertClientStates().catch(() => {})
+  }, 30_000)
 }
 
 start().catch(err => {
