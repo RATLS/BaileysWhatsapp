@@ -23,7 +23,7 @@ async function sendClientSnapshot(socket, clientId) {
 module.exports = async function (fastify) {
   fastify.get("/ws", { websocket: true }, (socket, req) => {
     
-    let registered = false
+    let subscribedClientId = null
     let clientId = null
 
     socket.on("message", async (raw) => {
@@ -38,15 +38,15 @@ module.exports = async function (fastify) {
         clientId = data.clientId
 
         // Register socket on first message (including ping) so reconnects
-        // that only send heartbeat messages still receive broadcasts.
-        let justRegistered = false
-        if (!registered) {
+        // that only send heartbeat messages still receive broadcasts. If a
+        // caller reuses the socket for another client, move the subscription.
+        const subscriptionChanged = subscribedClientId !== clientId
+        if (subscriptionChanged) {
           register(clientId, socket)
-          registered = true
-          justRegistered = true
+          subscribedClientId = clientId
         }
 
-        if (justRegistered) {
+        if (subscriptionChanged) {
           await sendClientSnapshot(socket, clientId)
         }
 
@@ -58,7 +58,7 @@ module.exports = async function (fastify) {
           }))
           // Re-sync current status/QR on every heartbeat so the connection
           // self-heals against any dropped broadcast.
-          if (!justRegistered) {
+          if (!subscriptionChanged) {
             await sendClientSnapshot(socket, clientId)
           }
           return
