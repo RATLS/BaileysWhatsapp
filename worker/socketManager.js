@@ -297,6 +297,12 @@ async function initClient(clientId) {
     sockets.set(clientId, sock)
     await markActive(clientId)
 
+    // Start the sender loop immediately so queued messages are consumed as
+    // soon as the client connects, even if the worker restarted while the
+    // client was in QR_REQUIRED or DISCONNECTED state. The loop safely sleeps
+    // until connectedClients includes this clientId.
+    startSenderLoop(clientId)
+
     sock.ev.on("creds.update", saveCreds)
 
     sock.ev.on("connection.update", async (update) => {
