@@ -6,6 +6,43 @@ function loadApiBase() {
   return localStorage.getItem("apiBase") || DEFAULT_API_BASE
 }
 
+const STATE_META = {
+  CREATED:      { label: "Created",      cls: "state-created" },
+  CONNECTING:   { label: "Connecting",   cls: "state-connecting" },
+  QR_REQUIRED:  { label: "Scan QR",      cls: "state-qr" },
+  CONNECTED:    { label: "Connected",    cls: "state-connected" },
+  DISCONNECTED: { label: "Disconnected", cls: "state-disconnected" },
+  LOGGED_OUT:   { label: "Logged Out",   cls: "state-loggedout" },
+  STOPPED:      { label: "Stopped",      cls: "state-stopped" },
+}
+
+function Modal({ title, subtitle, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose() }
+    window.addEventListener("keydown", onKey)
+    document.body.style.overflow = "hidden"
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      document.body.style.overflow = ""
+    }
+  }, [onClose])
+
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal-panel">
+        <div className="modal-header">
+          <div>
+            <div className="modal-title">{title}</div>
+            {subtitle && <div className="modal-subtitle">{subtitle}</div>}
+          </div>
+          <button className="modal-close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [apiBase, setApiBase] = useState(loadApiBase)
   const [clientStates, setClientStates] = useState({})
@@ -15,31 +52,31 @@ function App() {
   const [sendDelayForm, setSendDelayForm] = useState({ minMs: "3000", maxMs: "8000" })
   const [sendDelaySaving, setSendDelaySaving] = useState(false)
   const [sendDelayError, setSendDelayError] = useState("")
-  const [logs, setLogs] = useState("")
-  const [logService, setLogService] = useState("worker")
-  const [logTail, setLogTail] = useState(200)
   const [sendForm, setSendForm] = useState({ clientId: "", phoneNumber: "", text: "" })
   const [newClientId, setNewClientId] = useState("")
-  const [queueLookupId, setQueueLookupId] = useState("")
-  const [queueClientId, setQueueClientId] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [lastRefresh, setLastRefresh] = useState(null)
+  const [directLookupId, setDirectLookupId] = useState("")
+
+  // Queue modal
+  const [queueModal, setQueueModal] = useState(null)
   const [queueData, setQueueData] = useState(null)
   const [queueLoading, setQueueLoading] = useState(false)
   const [queueError, setQueueError] = useState("")
-  const [bottomTab, setBottomTab] = useState("queue")
-  const [msgLogLookupId, setMsgLogLookupId] = useState("")
-  const [msgLogClientId, setMsgLogClientId] = useState("")
+
+  // Message log modal
+  const [msgLogModal, setMsgLogModal] = useState(null)
   const [msgLogData, setMsgLogData] = useState(null)
   const [msgLogLoading, setMsgLogLoading] = useState(false)
   const [msgLogError, setMsgLogError] = useState("")
-  const [persistLogLookupId, setPersistLogLookupId] = useState("")
-  const [persistLogClientId, setPersistLogClientId] = useState("")
+
+  // Persistent log modal
+  const [persistModal, setPersistModal] = useState(null)
   const [persistLogFrom, setPersistLogFrom] = useState(() => new Date().toISOString().slice(0, 10))
   const [persistLogTo, setPersistLogTo] = useState(() => new Date().toISOString().slice(0, 10))
   const [persistLogData, setPersistLogData] = useState(null)
   const [persistLogLoading, setPersistLogLoading] = useState(false)
   const [persistLogError, setPersistLogError] = useState("")
-  const [loading, setLoading] = useState(false)
-  const [lastRefresh, setLastRefresh] = useState(null)
 
   const clients = useMemo(() => Object.keys(clientStates || {}), [clientStates])
 
@@ -50,7 +87,7 @@ function App() {
   }
 
   async function apiPost(path, body) {
-    const res = await fetch(`${apiBase}${path}` , {
+    const res = await fetch(`${apiBase}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body || {})
@@ -90,46 +127,24 @@ function App() {
     return () => clearInterval(id)
   }, [apiBase])
 
-  useEffect(() => {
-    localStorage.setItem("apiBase", apiBase)
-  }, [apiBase])
+  useEffect(() => { localStorage.setItem("apiBase", apiBase) }, [apiBase])
 
   useEffect(() => {
     let cancelled = false
-
     async function loadSendDelay() {
       try {
         const data = await apiGet("/config/send-delay")
         if (cancelled) return
         setSendDelay(data)
-        setSendDelayForm({
-          minMs: String(data.minMs ?? 3000),
-          maxMs: String(data.maxMs ?? 8000)
-        })
+        setSendDelayForm({ minMs: String(data.minMs ?? 3000), maxMs: String(data.maxMs ?? 8000) })
         setSendDelayError("")
-      } catch (err) {
-        if (!cancelled) {
-          setSendDelayError("Failed to load send delay config")
-        }
+      } catch {
+        if (!cancelled) setSendDelayError("Failed to load send delay config")
       }
     }
-
     loadSendDelay()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [apiBase])
-
-  async function fetchLogs() {
-    try {
-      const res = await fetch(`/api/logs?service=${encodeURIComponent(logService)}&tail=${logTail}`)
-      if (!res.ok) throw new Error("logs fetch failed")
-      const text = await res.text()
-      setLogs(text)
-    } catch (err) {
-      setLogs("Failed to load logs. Check dashboard server and docker socket access.")
-    }
-  }
 
   async function createClient() {
     if (!newClientId) return
@@ -154,95 +169,99 @@ function App() {
   }
 
   async function deleteClient(clientId) {
+    if (!window.confirm(`Delete client "${clientId}"? This cannot be undone.`)) return
     await apiDelete(`/clients/${encodeURIComponent(clientId)}`)
     await refreshAll()
-    if (queueClientId === clientId) {
-      setQueueClientId("")
-      setQueueData(null)
-      setQueueError("")
-    }
   }
 
-  async function loadQueue(clientId) {
-    if (!clientId) return
-    setQueueClientId(clientId)
-    setQueueLookupId(clientId)
+  // ── Queue ─────────────────────────────────────────────────────────────────
+
+  async function fetchQueue(clientId) {
     setQueueLoading(true)
     setQueueError("")
     try {
       const data = await apiGet(`/clients/${encodeURIComponent(clientId)}/queue?limit=100`)
       setQueueData(data)
-    } catch (err) {
-      setQueueData(null)
+    } catch {
       setQueueError(`Failed to load queue for ${clientId}`)
     } finally {
       setQueueLoading(false)
     }
   }
 
-  async function loadMsgLog(clientId) {
-    if (!clientId) return
-    setMsgLogClientId(clientId)
-    setMsgLogLookupId(clientId)
+  function openQueueModal(clientId) {
+    setQueueModal({ clientId })
+    setQueueData(null)
+    fetchQueue(clientId)
+  }
+
+  async function clearQueue(clientId) {
+    if (!window.confirm(`Clear all pending messages for "${clientId}"?`)) return
+    setQueueLoading(true)
+    setQueueError("")
+    try {
+      await apiDelete(`/clients/${encodeURIComponent(clientId)}/queue`)
+      await fetchQueue(clientId)
+    } catch {
+      setQueueError(`Failed to clear queue for ${clientId}`)
+      setQueueLoading(false)
+    }
+  }
+
+  // ── Message logs ──────────────────────────────────────────────────────────
+
+  async function fetchMsgLog(clientId) {
     setMsgLogLoading(true)
     setMsgLogError("")
-    setBottomTab("msglog")
     try {
       const data = await apiGet(`/clients/${encodeURIComponent(clientId)}/messages/log?limit=100`)
       setMsgLogData(data)
-    } catch (err) {
-      setMsgLogData(null)
+    } catch {
       setMsgLogError(`Failed to load message logs for ${clientId}`)
     } finally {
       setMsgLogLoading(false)
     }
   }
 
-  async function loadPersistentLog(clientId) {
-    if (!clientId) return
-    setPersistLogClientId(clientId)
-    setPersistLogLookupId(clientId)
+  function openMsgLogModal(clientId) {
+    setMsgLogModal({ clientId })
+    setMsgLogData(null)
+    fetchMsgLog(clientId)
+  }
+
+  // ── Persistent logs ───────────────────────────────────────────────────────
+
+  async function fetchPersistLog(clientId, from, to) {
     setPersistLogLoading(true)
     setPersistLogError("")
-    setBottomTab("persistent")
     try {
-      const params = new URLSearchParams({ from: persistLogFrom, to: persistLogTo, limit: 500 })
+      const params = new URLSearchParams({ from, to, limit: 500 })
       const data = await apiGet(`/clients/${encodeURIComponent(clientId)}/logs/persistent?${params}`)
       setPersistLogData(data)
     } catch {
-      setPersistLogData(null)
       setPersistLogError(`Failed to load persistent logs for ${clientId}`)
     } finally {
       setPersistLogLoading(false)
     }
   }
 
+  function openPersistModal(clientId) {
+    setPersistModal({ clientId })
+    setPersistLogData(null)
+    fetchPersistLog(clientId, persistLogFrom, persistLogTo)
+  }
+
   async function deletePersistentLog(clientId) {
-    if (!window.confirm(`Delete persistent log file for ${clientId}? This cannot be undone.`)) return
+    if (!window.confirm(`Delete persistent log file for "${clientId}"? This cannot be undone.`)) return
     try {
       await apiDelete(`/clients/${encodeURIComponent(clientId)}/logs/persistent`)
       setPersistLogData(null)
-      setPersistLogClientId("")
-      setPersistLogError("")
     } catch {
       setPersistLogError(`Failed to delete log for ${clientId}`)
     }
   }
 
-  async function clearQueue(clientId, confirm = true) {
-    if (confirm && !window.confirm(`Clear all pending messages for ${clientId}?`)) {
-      return
-    }
-    setQueueLoading(true)
-    setQueueError("")
-    try {
-      await apiDelete(`/clients/${encodeURIComponent(clientId)}/queue`)
-      await loadQueue(clientId)
-    } catch (err) {
-      setQueueError(`Failed to clear queue for ${clientId}`)
-      setQueueLoading(false)
-    }
-  }
+  // ── Send / delay ──────────────────────────────────────────────────────────
 
   async function sendTestMessage() {
     if (!sendForm.clientId || !sendForm.phoneNumber || !sendForm.text) return
@@ -263,16 +282,9 @@ function App() {
         minMs: Number(sendDelayForm.minMs),
         maxMs: Number(sendDelayForm.maxMs)
       })
-      setSendDelay({
-        minMs: data.minMs,
-        maxMs: data.maxMs,
-        source: "redis"
-      })
-      setSendDelayForm({
-        minMs: String(data.minMs),
-        maxMs: String(data.maxMs)
-      })
-    } catch (err) {
+      setSendDelay({ minMs: data.minMs, maxMs: data.maxMs, source: "redis" })
+      setSendDelayForm({ minMs: String(data.minMs), maxMs: String(data.maxMs) })
+    } catch {
       setSendDelayError("Failed to save send delay config")
     } finally {
       setSendDelaySaving(false)
@@ -283,28 +295,35 @@ function App() {
 
   return (
     <div className="page">
-      <header className="hero">
-        <div>
+      {/* ── Header ──────────────────────────────── */}
+      <header className="header">
+        <div className="header-left">
           <div className="eyebrow">Baileys Ops</div>
           <h1>Socket Control Center</h1>
-          <p>Manage clients, sessions, and stdout logs on a single EC2 node.</p>
+          <p className="header-desc">WhatsApp client management on a single node</p>
         </div>
-        <div className="card glow">
-          <div className="label">API Base</div>
+        <div className="card api-card">
+          <label className="field-label">API Endpoint</label>
           <input
             value={apiBase}
             onChange={(e) => setApiBase(e.target.value)}
             placeholder={DEFAULT_API_BASE}
           />
-          <div className="meta">
-            Last refresh: {lastRefresh ? lastRefresh.toLocaleTimeString() : "never"}
+          <div className="refresh-row">
+            <button className="btn-secondary" onClick={refreshAll} disabled={loading}>
+              {loading ? "Refreshing…" : "↺ Refresh"}
+            </button>
+            <span className="meta">
+              {lastRefresh ? `Updated ${lastRefresh.toLocaleTimeString()}` : "Not yet refreshed"}
+            </span>
           </div>
         </div>
       </header>
 
-      <section className="grid">
+      {/* ── Top grid ────────────────────────────── */}
+      <div className="top-grid">
         <div className="card">
-          <div className="section-title">Overview</div>
+          <div className="section-label">System Overview</div>
           <div className="stat-row">
             <div className="stat">
               <div className="stat-label">Known Clients</div>
@@ -319,369 +338,345 @@ function App() {
               <div className="stat-value">{Object.values(wsStats).reduce((a, b) => a + b, 0)}</div>
             </div>
           </div>
-          <button onClick={refreshAll} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh Now"}
-          </button>
         </div>
 
         <div className="card">
-          <div className="section-title">Create Client</div>
-          <input
-            value={newClientId}
-            onChange={(e) => setNewClientId(e.target.value)}
-            placeholder="client-123"
-          />
-          <button onClick={createClient}>Create</button>
+          <div className="section-label">Create New Client</div>
+          <div className="inline-form">
+            <input
+              value={newClientId}
+              onChange={(e) => setNewClientId(e.target.value)}
+              placeholder="e.g. client-123"
+              onKeyDown={(e) => e.key === "Enter" && createClient()}
+            />
+            <button className="btn-primary" onClick={createClient} disabled={!newClientId}>
+              Create
+            </button>
+          </div>
         </div>
 
         <div className="card">
-          <div className="section-title">Send Test Message</div>
+          <div className="section-label">Send Test Message</div>
           <input
             value={sendForm.clientId}
             onChange={(e) => setSendForm({ ...sendForm, clientId: e.target.value })}
-            placeholder="clientId"
+            placeholder="Client ID"
           />
           <input
             value={sendForm.phoneNumber}
             onChange={(e) => setSendForm({ ...sendForm, phoneNumber: e.target.value })}
-            placeholder="phoneNumber"
+            placeholder="Phone number"
           />
           <input
             value={sendForm.text}
             onChange={(e) => setSendForm({ ...sendForm, text: e.target.value })}
-            placeholder="message text"
+            placeholder="Message text"
           />
-          <button onClick={sendTestMessage}>Queue Message</button>
-        </div>
-
-        <div className="card">
-          <div className="section-title">Send Delay</div>
-          <input
-            type="number"
-            min="500"
-            max="120000"
-            value={sendDelayForm.minMs}
-            onChange={(e) => setSendDelayForm({ ...sendDelayForm, minMs: e.target.value })}
-            placeholder="min delay ms"
-          />
-          <input
-            type="number"
-            min="500"
-            max="120000"
-            value={sendDelayForm.maxMs}
-            onChange={(e) => setSendDelayForm({ ...sendDelayForm, maxMs: e.target.value })}
-            placeholder="max delay ms"
-          />
-          <div className="meta">
-            Active: {sendDelay.minMs}ms - {sendDelay.maxMs}ms ({sendDelay.source})
-          </div>
-          {sendDelayError && <div className="queue-error">{sendDelayError}</div>}
-          <button onClick={saveSendDelay} disabled={sendDelaySaving}>
-            {sendDelaySaving ? "Saving..." : "Save Delay"}
+          <button
+            className="btn-primary"
+            onClick={sendTestMessage}
+            disabled={!sendForm.clientId || !sendForm.phoneNumber || !sendForm.text}
+          >
+            Queue Message
           </button>
         </div>
-      </section>
 
-      <section className="grid wide">
         <div className="card">
-          <div className="section-title">Clients</div>
-          <div className="list">
-            {sortedClients.length === 0 && <div className="empty">No clients yet</div>}
-            {sortedClients.map((clientId) => {
-              const state = clientStates[clientId]
-              const wsCount = wsStats[clientId] || 0
-              const isActive = activeClients.includes(clientId)
-              return (
-                <div key={clientId} className="row">
-                  <div className="row-main">
-                    <div className="row-title">{clientId}</div>
-                    <div className="row-meta">
-                      State: {state || "UNKNOWN"} · Active: {isActive ? "yes" : "no"} · WS: {wsCount}
-                    </div>
+          <div className="section-label">Send Delay</div>
+          <div className="delay-row">
+            <div>
+              <label className="field-label">Min (ms)</label>
+              <input
+                type="number" min="500" max="120000"
+                value={sendDelayForm.minMs}
+                onChange={(e) => setSendDelayForm({ ...sendDelayForm, minMs: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="field-label">Max (ms)</label>
+              <input
+                type="number" min="500" max="120000"
+                value={sendDelayForm.maxMs}
+                onChange={(e) => setSendDelayForm({ ...sendDelayForm, maxMs: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="meta" style={{ marginTop: 6 }}>
+            Active: {sendDelay.minMs}ms – {sendDelay.maxMs}ms · source: {sendDelay.source}
+          </div>
+          {sendDelayError && <div className="error-text">{sendDelayError}</div>}
+          <button className="btn-primary" onClick={saveSendDelay} disabled={sendDelaySaving}>
+            {sendDelaySaving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Clients ─────────────────────────────── */}
+      <div className="card clients-card">
+        <div className="clients-header">
+          <div className="clients-header-left">
+            <div className="section-label" style={{ marginBottom: 0 }}>Connected Clients</div>
+            <span className="meta">{sortedClients.length} total</span>
+          </div>
+          <div className="direct-lookup">
+            <input
+              value={directLookupId}
+              onChange={(e) => setDirectLookupId(e.target.value)}
+              placeholder="Look up any client queue by ID…"
+              onKeyDown={(e) => e.key === "Enter" && directLookupId.trim() && openQueueModal(directLookupId.trim())}
+            />
+            <button
+              className="btn-view"
+              onClick={() => directLookupId.trim() && openQueueModal(directLookupId.trim())}
+              disabled={!directLookupId.trim()}
+            >
+              View Queue
+            </button>
+          </div>
+        </div>
+
+        {sortedClients.length === 0 && (
+          <div className="empty-state">No clients yet — create one above to get started.</div>
+        )}
+
+        <div className="client-list">
+          {sortedClients.map((clientId) => {
+            const state = clientStates[clientId]
+            const wsCount = wsStats[clientId] || 0
+            const isActive = activeClients.includes(clientId)
+            const meta = STATE_META[state] || { label: state || "Unknown", cls: "state-unknown" }
+            return (
+              <div key={clientId} className="client-row">
+                <div className="client-info">
+                  <div className="client-id">{clientId}</div>
+                  <div className="client-badges">
+                    <span className={`state-badge ${meta.cls}`}>{meta.label}</span>
+                    {isActive && <span className="live-badge">● Live</span>}
+                    {wsCount > 0 && <span className="ws-badge">{wsCount} WS</span>}
                   </div>
-                  <div className="row-actions">
+                </div>
+
+                <div className="client-actions">
+                  <div className="action-group">
+                    <span className="action-label">View</span>
+                    <button className="btn-view" onClick={() => openQueueModal(clientId)}>Queue</button>
+                    <button className="btn-view" onClick={() => openMsgLogModal(clientId)}>Logs</button>
+                    <button className="btn-view" onClick={() => openPersistModal(clientId)}>History</button>
+                  </div>
+                  <div className="action-sep" />
+                  <div className="action-group">
+                    <span className="action-label">Control</span>
+                    <button className="btn-control" onClick={() => reconnectClient(clientId)}>Reconnect</button>
+                    <button className="btn-control" onClick={() => restartClient(clientId, false)}>Restart</button>
                     <button
-                      className={queueClientId === clientId && bottomTab === "queue" ? "active-action" : ""}
-                      onClick={() => { setBottomTab("queue"); loadQueue(clientId) }}
+                      className="btn-control"
+                      onClick={() => restartClient(clientId, true)}
+                      title="Wipe WhatsApp session then restart"
                     >
-                      View Queue
+                      Reset+Restart
                     </button>
-                    <button onClick={() => clearQueue(clientId, true)}>Clear Queue</button>
-                    <button
-                      className={msgLogClientId === clientId && bottomTab === "msglog" ? "active-action" : ""}
-                      onClick={() => loadMsgLog(clientId)}
-                    >
-                      View Logs
-                    </button>
-                    <button
-                      className={persistLogClientId === clientId && bottomTab === "persistent" ? "active-action" : ""}
-                      onClick={() => loadPersistentLog(clientId)}
-                    >
-                      Persistent Log
-                    </button>
-                    <button onClick={() => reconnectClient(clientId)}>Reconnect</button>
-                    <button className="btn-restart" onClick={() => restartClient(clientId, false)}>Restart</button>
-                    <button className="btn-restart" onClick={() => restartClient(clientId, true)}>Reset+Restart</button>
+                  </div>
+                  <div className="action-sep" />
+                  <div className="action-group">
+                    <span className="action-label">Stop</span>
                     <button className="btn-stop" onClick={() => stopClient(clientId, false)}>Stop</button>
-                    <button className="btn-stop" onClick={() => stopClient(clientId, true)}>Reset+Stop</button>
-                    <button className="danger" onClick={() => deleteClient(clientId)}>Delete</button>
+                    <button
+                      className="btn-stop"
+                      onClick={() => stopClient(clientId, true)}
+                      title="Wipe WhatsApp session then stop"
+                    >
+                      Reset+Stop
+                    </button>
+                    <button className="btn-danger" onClick={() => deleteClient(clientId)}>Delete</button>
                   </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ── Queue Modal ──────────────────────────── */}
+      {queueModal && (
+        <Modal
+          title={`Message Queue — ${queueModal.clientId}`}
+          subtitle={
+            queueLoading ? "Loading…"
+            : queueData ? `${queueData.total ?? 0} pending · showing ${queueData.returned ?? 0}`
+            : undefined
+          }
+          onClose={() => { setQueueModal(null); setQueueData(null) }}
+        >
+          <div className="modal-toolbar">
+            <button
+              className="btn-secondary"
+              onClick={() => fetchQueue(queueModal.clientId)}
+              disabled={queueLoading}
+            >
+              {queueLoading ? "Loading…" : "↺ Refresh"}
+            </button>
+            <button
+              className="btn-danger-sm"
+              onClick={() => clearQueue(queueModal.clientId)}
+              disabled={queueLoading}
+            >
+              Clear Queue
+            </button>
+          </div>
+          {queueError && <div className="error-text">{queueError}</div>}
+          <div className="modal-list">
+            {!queueLoading && queueData?.messages?.length === 0 && (
+              <div className="empty-state">Queue is empty — no pending messages.</div>
+            )}
+            {queueData?.messages?.map((entry) => {
+              const p = entry.parsed || {}
+              return (
+                <div key={`${entry.index}-${entry.raw?.slice(0, 20)}`} className="log-item">
+                  <div className="log-item-header">
+                    <span className="log-index">#{entry.index + 1}</span>
+                    {p.type && <span className="log-type">{p.type}</span>}
+                    <span className="meta">{p.phoneNumber || "—"}</span>
+                    {Array.isArray(p.files) && p.files.length > 0 && (
+                      <span className="meta">{p.files.length} file(s)</span>
+                    )}
+                  </div>
+                  {p.text && <div className="log-text">{p.text}</div>}
                 </div>
               )
             })}
           </div>
-        </div>
-
-        <div className="card">
-          <div className="section-title">Logs (stdout)</div>
-          <div className="controls">
-            <select value={logService} onChange={(e) => setLogService(e.target.value)}>
-              <option value="worker">worker</option>
-              <option value="api">api</option>
-              <option value="redis">redis</option>
-              <option value="dashboard">dashboard</option>
-            </select>
-            <input
-              type="number"
-              min="10"
-              max="2000"
-              value={logTail}
-              onChange={(e) => setLogTail(Number(e.target.value))}
-            />
-            <button onClick={fetchLogs}>Load Logs</button>
+          <div className="modal-footer-note">
+            Read-only view of pending jobs. Use "Clear Queue" to drop all pending messages.
           </div>
-          <pre className="log-box">{logs || ""}</pre>
-        </div>
-      </section>
+        </Modal>
+      )}
 
-      <section className="grid">
-        <div className="card">
-          <div className="tab-bar">
+      {/* ── Message Log Modal ────────────────────── */}
+      {msgLogModal && (
+        <Modal
+          title={`Message Logs — ${msgLogModal.clientId}`}
+          subtitle={
+            msgLogLoading ? "Loading…"
+            : msgLogData
+              ? `${msgLogData.total ?? 0} logged · showing ${msgLogData.returned ?? 0} · kept 7 days`
+            : undefined
+          }
+          onClose={() => { setMsgLogModal(null); setMsgLogData(null) }}
+        >
+          <div className="modal-toolbar">
             <button
-              className={bottomTab === "queue" ? "tab active-tab" : "tab"}
-              onClick={() => setBottomTab("queue")}
+              className="btn-secondary"
+              onClick={() => fetchMsgLog(msgLogModal.clientId)}
+              disabled={msgLogLoading}
             >
-              Client Queue
-            </button>
-            <button
-              className={bottomTab === "msglog" ? "tab active-tab" : "tab"}
-              onClick={() => setBottomTab("msglog")}
-            >
-              Message Logs
-            </button>
-            <button
-              className={bottomTab === "persistent" ? "tab active-tab" : "tab"}
-              onClick={() => setBottomTab("persistent")}
-            >
-              Persistent Logs
+              {msgLogLoading ? "Loading…" : "↺ Refresh"}
             </button>
           </div>
+          {msgLogError && <div className="error-text">{msgLogError}</div>}
+          <div className="modal-list">
+            {!msgLogLoading && msgLogData?.messages?.length === 0 && (
+              <div className="empty-state">No message logs yet.</div>
+            )}
+            {msgLogData?.messages?.map((entry, i) => {
+              const ts = entry.sentAt ? new Date(entry.sentAt).toLocaleString() : "unknown time"
+              const isFailed = entry.status === "failed"
+              return (
+                <div key={`${i}-${entry.sentAt}`} className={`log-item${isFailed ? " log-item-failed" : ""}`}>
+                  <div className="log-item-header">
+                    <span className={`status-badge ${isFailed ? "status-failed" : "status-sent"}`}>
+                      {entry.status || "unknown"}
+                    </span>
+                    <span className="meta">{entry.phoneNumber || "—"}</span>
+                    {(entry.fileCount ?? 0) > 0 && <span className="meta">{entry.fileCount} file(s)</span>}
+                    <span className="meta">{ts}</span>
+                  </div>
+                  {entry.text && <div className="log-text">{entry.text}</div>}
+                  {isFailed && entry.failReason && (
+                    <div className="log-error">Error: {entry.failReason}</div>
+                  )}
+                  {entry.parseError && <div className="log-error">Malformed log entry</div>}
+                </div>
+              )
+            })}
+          </div>
+          <div className="modal-footer-note">Logs auto-expire after 7 days.</div>
+        </Modal>
+      )}
 
-          {bottomTab === "queue" && (
-            <>
-              <div className="queue-lookup">
-                <input
-                  value={queueLookupId}
-                  onChange={(e) => setQueueLookupId(e.target.value)}
-                  placeholder="Enter clientId to view queue (including non-created clients)"
-                />
-                <button onClick={() => loadQueue(queueLookupId.trim())} disabled={!queueLookupId.trim() || queueLoading}>
-                  View Queue
-                </button>
-                <button onClick={() => clearQueue(queueLookupId.trim(), true)} disabled={!queueLookupId.trim() || queueLoading}>
-                  Clear Queue
-                </button>
-              </div>
-              {!queueClientId && <div className="empty">Pick a client and click View Queue.</div>}
-              {queueClientId && (
-                <>
-                  <div className="queue-header">
-                    <div className="meta">
-                      Client: {queueClientId} · Total queued: {queueData?.total ?? "-"} · Showing: {queueData?.returned ?? 0}
-                    </div>
-                    <div className="queue-actions">
-                      <button onClick={() => loadQueue(queueClientId)} disabled={queueLoading}>
-                        {queueLoading ? "Loading..." : "Refresh Queue"}
-                      </button>
-                      <button onClick={() => clearQueue(queueClientId, true)} disabled={queueLoading}>
-                        Clear Queue
-                      </button>
-                    </div>
+      {/* ── Persistent Log Modal ─────────────────── */}
+      {persistModal && (
+        <Modal
+          title={`Persistent History — ${persistModal.clientId}`}
+          subtitle={
+            persistLogLoading ? "Loading…"
+            : persistLogData
+              ? `${persistLogData.total ?? 0} matched · showing ${persistLogData.returned ?? 0}`
+            : undefined
+          }
+          onClose={() => { setPersistModal(null); setPersistLogData(null) }}
+        >
+          <div className="modal-toolbar persist-toolbar">
+            <div className="date-range">
+              <label className="field-label">From</label>
+              <input
+                type="date"
+                value={persistLogFrom}
+                onChange={(e) => setPersistLogFrom(e.target.value)}
+              />
+              <label className="field-label">To</label>
+              <input
+                type="date"
+                value={persistLogTo}
+                onChange={(e) => setPersistLogTo(e.target.value)}
+              />
+            </div>
+            <div className="toolbar-btns">
+              <button
+                className="btn-secondary"
+                onClick={() => fetchPersistLog(persistModal.clientId, persistLogFrom, persistLogTo)}
+                disabled={persistLogLoading}
+              >
+                {persistLogLoading ? "Loading…" : "↺ Load"}
+              </button>
+              <button
+                className="btn-danger-sm"
+                onClick={() => deletePersistentLog(persistModal.clientId)}
+              >
+                Delete File
+              </button>
+            </div>
+          </div>
+          {persistLogError && <div className="error-text">{persistLogError}</div>}
+          <div className="modal-list">
+            {!persistLogLoading && persistLogData?.entries?.length === 0 && (
+              <div className="empty-state">No entries in this date range.</div>
+            )}
+            {persistLogData?.entries?.map((entry, i) => {
+              const ts = entry.sentAt ? new Date(entry.sentAt).toLocaleString() : "unknown"
+              const isFailed = entry.status === "failed"
+              return (
+                <div key={`${i}-${entry.sentAt}`} className={`log-item${isFailed ? " log-item-failed" : ""}`}>
+                  <div className="log-item-header">
+                    <span className={`status-badge ${isFailed ? "status-failed" : "status-sent"}`}>
+                      {entry.status || "unknown"}
+                    </span>
+                    <span className="meta">{entry.phoneNumber || "—"}</span>
+                    {(entry.fileCount ?? 0) > 0 && <span className="meta">{entry.fileCount} file(s)</span>}
+                    <span className="meta">{ts}</span>
                   </div>
-                  {queueError && <div className="queue-error">{queueError}</div>}
-                  <div className="queue-list">
-                    {!queueLoading && queueData?.messages?.length === 0 && (
-                      <div className="empty">Queue is empty.</div>
-                    )}
-                    {queueData?.messages?.map((entry) => {
-                      const p = entry.parsed || {}
-                      return (
-                        <div key={`${entry.index}-${entry.raw?.slice(0, 20)}`} className="queue-item">
-                          <div className="queue-item-top">
-                            <strong>#{entry.index + 1}</strong>
-                            <span className="meta">
-                              {p.type || "UNKNOWN"} · {p.phoneNumber || "n/a"} · files: {Array.isArray(p.files) ? p.files.length : 0}
-                            </span>
-                          </div>
-                          <div className="queue-text">{p.text || "(no text)"}</div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-              <div className="meta">
-                Queue panel is read-only for payload details; use Clear Queue to drop pending jobs.
-              </div>
-            </>
-          )}
-
-          {bottomTab === "msglog" && (
-            <>
-              <div className="queue-lookup">
-                <input
-                  value={msgLogLookupId}
-                  onChange={(e) => setMsgLogLookupId(e.target.value)}
-                  placeholder="Enter clientId to view message logs"
-                />
-                <button onClick={() => loadMsgLog(msgLogLookupId.trim())} disabled={!msgLogLookupId.trim() || msgLogLoading}>
-                  View Logs
-                </button>
-              </div>
-              {!msgLogClientId && <div className="empty">Pick a client and click View Logs.</div>}
-              {msgLogClientId && (
-                <>
-                  <div className="queue-header">
-                    <div className="meta">
-                      Client: {msgLogClientId} · Total logged: {msgLogData?.total ?? "-"} · Showing: {msgLogData?.returned ?? 0} · Logs kept for 7 days
-                    </div>
-                    <div className="queue-actions">
-                      <button onClick={() => loadMsgLog(msgLogClientId)} disabled={msgLogLoading}>
-                        {msgLogLoading ? "Loading..." : "Refresh Logs"}
-                      </button>
-                    </div>
-                  </div>
-                  {msgLogError && <div className="queue-error">{msgLogError}</div>}
-                  <div className="queue-list">
-                    {!msgLogLoading && msgLogData?.messages?.length === 0 && (
-                      <div className="empty">No message logs yet.</div>
-                    )}
-                    {msgLogData?.messages?.map((entry, i) => {
-                      const ts = entry.sentAt
-                        ? new Date(entry.sentAt).toLocaleString()
-                        : "unknown time"
-                      const isFailed = entry.status === "failed"
-                      return (
-                        <div
-                          key={`${i}-${entry.sentAt}`}
-                          className={`queue-item${isFailed ? " queue-item-failed" : ""}`}
-                        >
-                          <div className="queue-item-top">
-                            <span className={`status-badge ${isFailed ? "status-failed" : "status-sent"}`}>
-                              {entry.status || "unknown"}
-                            </span>
-                            <span className="meta">
-                              {entry.phoneNumber || "n/a"} · files: {entry.fileCount ?? 0} · {ts}
-                            </span>
-                          </div>
-                          {entry.text && <div className="queue-text">{entry.text}</div>}
-                          {isFailed && entry.failReason && (
-                            <div className="queue-text fail-reason">Error: {entry.failReason}</div>
-                          )}
-                          {entry.parseError && (
-                            <div className="queue-text fail-reason">Malformed log entry</div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-              <div className="meta">
-                Logs are written per send attempt. Failed sends show error reason. Entries expire after 7 days.
-              </div>
-            </>
-          )}
-
-          {bottomTab === "persistent" && (
-            <>
-              <div className="queue-lookup">
-                <input
-                  value={persistLogLookupId}
-                  onChange={(e) => setPersistLogLookupId(e.target.value)}
-                  placeholder="Enter clientId to view persistent logs"
-                />
-                <input
-                  type="date"
-                  value={persistLogFrom}
-                  onChange={(e) => setPersistLogFrom(e.target.value)}
-                />
-                <input
-                  type="date"
-                  value={persistLogTo}
-                  onChange={(e) => setPersistLogTo(e.target.value)}
-                />
-                <button
-                  onClick={() => loadPersistentLog(persistLogLookupId.trim())}
-                  disabled={!persistLogLookupId.trim() || persistLogLoading}
-                >
-                  Load
-                </button>
-              </div>
-              {!persistLogClientId && <div className="empty">Pick a client and click Load.</div>}
-              {persistLogClientId && (
-                <>
-                  <div className="queue-header">
-                    <div className="meta">
-                      Client: {persistLogClientId} · Matched: {persistLogData?.total ?? "-"} · Showing: {persistLogData?.returned ?? 0}
-                    </div>
-                    <div className="queue-actions">
-                      <button onClick={() => loadPersistentLog(persistLogClientId)} disabled={persistLogLoading}>
-                        {persistLogLoading ? "Loading..." : "Refresh"}
-                      </button>
-                      <button className="danger" onClick={() => deletePersistentLog(persistLogClientId)}>
-                        Delete Log File
-                      </button>
-                    </div>
-                  </div>
-                  {persistLogError && <div className="queue-error">{persistLogError}</div>}
-                  <div className="queue-list">
-                    {!persistLogLoading && persistLogData?.entries?.length === 0 && (
-                      <div className="empty">No entries in this date range.</div>
-                    )}
-                    {persistLogData?.entries?.map((entry, i) => {
-                      const ts = entry.sentAt ? new Date(entry.sentAt).toLocaleString() : "unknown"
-                      const isFailed = entry.status === "failed"
-                      return (
-                        <div
-                          key={`${i}-${entry.sentAt}`}
-                          className={`queue-item${isFailed ? " queue-item-failed" : ""}`}
-                        >
-                          <div className="queue-item-top">
-                            <span className={`status-badge ${isFailed ? "status-failed" : "status-sent"}`}>
-                              {entry.status || "unknown"}
-                            </span>
-                            <span className="meta">
-                              {entry.phoneNumber || "n/a"} · files: {entry.fileCount ?? 0} · {ts}
-                            </span>
-                          </div>
-                          {entry.text && <div className="queue-text">{entry.text}</div>}
-                          {isFailed && entry.failReason && (
-                            <div className="queue-text fail-reason">Error: {entry.failReason}</div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-              <div className="meta">
-                Persistent logs are written to disk with no TTL. Use date filters to narrow results. Delete removes the file permanently.
-              </div>
-            </>
-          )}
-        </div>
-      </section>
+                  {entry.text && <div className="log-text">{entry.text}</div>}
+                  {isFailed && entry.failReason && (
+                    <div className="log-error">Error: {entry.failReason}</div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <div className="modal-footer-note">
+            Persistent logs have no TTL. "Delete File" permanently removes the log file.
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }

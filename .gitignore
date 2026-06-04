@@ -1,5 +1,37 @@
-sessions/
-nginx/certs/*
-!nginx/certs/.gitkeep
+# ── Dependencies ──────────────────────────────
+node_modules/
 api/node_modules/
 worker/node_modules/
+dashboard/node_modules/
+
+# ── Build output ───────────────────────────────
+dashboard/dist/
+
+# ── Environment & secrets ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ── WhatsApp sessions ──────────────────────────
+sessions/
+
+# ── Nginx TLS certs ────────────────────────────
+nginx/certs/*
+!nginx/certs/.gitkeep
+
+# ── Logs ───────────────────────────────────────
+*.log
+logs/
+persistent-logs/
+
+# ── Test coverage ──────────────────────────────
+coverage/
+.nyc_output/
+
+# ── OS / editor ────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
