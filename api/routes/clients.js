@@ -1,5 +1,9 @@
 const redis = require("../redis")
+const fs = require("fs")
+const path = require("path")
+const readline = require("readline")
 
+const MSGLOGS_DIR = "/logs/msglogs"
 const STATE_KEY = "wa:clients:state"
 const SEND_DELAY_CONFIG_KEY = "wa:config:sendDelay"
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{1,120}$/
@@ -231,6 +235,80 @@ module.exports = async function (fastify) {
       limit,
       messages
     }
+  })
+
+  fastify.get("/clients/:clientId/logs/persistent", async (req, res) => {
+    const { clientId } = req.params
+    if (!CLIENT_ID_RE.test(clientId)) {
+      return res.code(400).send({ error: "Invalid clientId format" })
+    }
+
+    const from = req.query && req.query.from ? String(req.query.from) : null
+    const to = req.query && req.query.to ? String(req.query.to) : null
+    const requestedLimit = Number(req.query && req.query.limit)
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(Math.max(Math.floor(requestedLimit), 1), 500)
+      : 500
+
+    const fromMs = from ? new Date(from + "T00:00:00.000Z").getTime() : 0
+    const toMs = to ? new Date(to + "T23:59:59.999Z").getTime() : Infinity
+
+    const filePath = path.join(MSGLOGS_DIR, `${clientId}.jsonl`)
+
+    let fileStream
+    try {
+      fileStream = fs.createReadStream(filePath, { encoding: "utf8" })
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return { clientId, total: 0, returned: 0, entries: [] }
+      }
+      throw err
+    }
+
+    const entries = []
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity })
+
+    await new Promise((resolve, reject) => {
+      fileStream.on("error", (err) => {
+        if (err.code === "ENOENT") resolve()
+        else reject(err)
+      })
+      rl.on("line", (line) => {
+        if (!line.trim()) return
+        try {
+          const entry = JSON.parse(line)
+          if (entry.sentAt >= fromMs && entry.sentAt <= toMs) {
+            entries.push(entry)
+          }
+        } catch {
+          // skip malformed lines
+        }
+      })
+      rl.on("close", resolve)
+      rl.on("error", reject)
+    })
+
+    entries.sort((a, b) => b.sentAt - a.sentAt)
+    const total = entries.length
+    const sliced = entries.slice(0, limit)
+
+    return { clientId, total, returned: sliced.length, entries: sliced }
+  })
+
+  fastify.delete("/clients/:clientId/logs/persistent", async (req, res) => {
+    const { clientId } = req.params
+    if (!CLIENT_ID_RE.test(clientId)) {
+      return res.code(400).send({ error: "Invalid clientId format" })
+    }
+
+    const filePath = path.join(MSGLOGS_DIR, `${clientId}.jsonl`)
+    try {
+      await fs.promises.unlink(filePath)
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err
+    }
+
+    return { ok: true }
   })
 
   fastify.get("/clients/:clientId/status", async (req, res) => {

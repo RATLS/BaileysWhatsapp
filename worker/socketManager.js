@@ -16,6 +16,23 @@ const Redis = require("ioredis")
 const { sendMessageWithMedia } = require("./mediaSender")
 const { info, warn, error, clientLog } = require("./logger")
 const { toJid } = require("./phone")
+const fs = require("fs")
+const path = require("path")
+
+const MSGLOGS_DIR = "/logs/msglogs"
+let msgLogsDirReady = false
+let msgLogsDirInitError = null
+
+function ensureMsgLogsDir() {
+  if (msgLogsDirReady || msgLogsDirInitError) return
+  try {
+    fs.mkdirSync(MSGLOGS_DIR, { recursive: true })
+    msgLogsDirReady = true
+  } catch (err) {
+    msgLogsDirInitError = err
+    warn(`⚠️ Could not create msglogs dir: ${err.message}`)
+  }
+}
 
 const WA_DEVICE_NAME = process.env.WA_DEVICE_NAME || "Admissions - CRM"
 const WA_DEVICE_PLATFORM = process.env.WA_DEVICE_PLATFORM || "Linux"
@@ -226,6 +243,12 @@ async function logMessage(clientId, entry) {
     await redis.pexpire(key, MSGLOG_TTL_MS)
   } catch (err) {
     warn(`⚠️ Failed to write message log for ${clientId}: ${err && err.message ? err.message : err}`)
+  }
+
+  ensureMsgLogsDir()
+  if (msgLogsDirReady) {
+    const filePath = path.join(MSGLOGS_DIR, `${clientId}.jsonl`)
+    fs.promises.appendFile(filePath, JSON.stringify(entry) + "\n").catch(() => {})
   }
 }
 

@@ -56,6 +56,8 @@ services:
     environment:
       LOG_LEVEL: "warn"
       API_LOG_LEVEL: "warn"
+    volumes:
+      - ./logs:/logs
     restart: unless-stopped
     deploy:
       resources:

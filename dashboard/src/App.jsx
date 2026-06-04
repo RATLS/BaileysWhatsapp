@@ -31,6 +31,13 @@ function App() {
   const [msgLogData, setMsgLogData] = useState(null)
   const [msgLogLoading, setMsgLogLoading] = useState(false)
   const [msgLogError, setMsgLogError] = useState("")
+  const [persistLogLookupId, setPersistLogLookupId] = useState("")
+  const [persistLogClientId, setPersistLogClientId] = useState("")
+  const [persistLogFrom, setPersistLogFrom] = useState(() => new Date().toISOString().slice(0, 10))
+  const [persistLogTo, setPersistLogTo] = useState(() => new Date().toISOString().slice(0, 10))
+  const [persistLogData, setPersistLogData] = useState(null)
+  const [persistLogLoading, setPersistLogLoading] = useState(false)
+  const [persistLogError, setPersistLogError] = useState("")
   const [loading, setLoading] = useState(false)
   const [lastRefresh, setLastRefresh] = useState(null)
 
@@ -188,6 +195,37 @@ function App() {
       setMsgLogError(`Failed to load message logs for ${clientId}`)
     } finally {
       setMsgLogLoading(false)
+    }
+  }
+
+  async function loadPersistentLog(clientId) {
+    if (!clientId) return
+    setPersistLogClientId(clientId)
+    setPersistLogLookupId(clientId)
+    setPersistLogLoading(true)
+    setPersistLogError("")
+    setBottomTab("persistent")
+    try {
+      const params = new URLSearchParams({ from: persistLogFrom, to: persistLogTo, limit: 500 })
+      const data = await apiGet(`/clients/${encodeURIComponent(clientId)}/logs/persistent?${params}`)
+      setPersistLogData(data)
+    } catch {
+      setPersistLogData(null)
+      setPersistLogError(`Failed to load persistent logs for ${clientId}`)
+    } finally {
+      setPersistLogLoading(false)
+    }
+  }
+
+  async function deletePersistentLog(clientId) {
+    if (!window.confirm(`Delete persistent log file for ${clientId}? This cannot be undone.`)) return
+    try {
+      await apiDelete(`/clients/${encodeURIComponent(clientId)}/logs/persistent`)
+      setPersistLogData(null)
+      setPersistLogClientId("")
+      setPersistLogError("")
+    } catch {
+      setPersistLogError(`Failed to delete log for ${clientId}`)
     }
   }
 
@@ -375,6 +413,12 @@ function App() {
                     >
                       View Logs
                     </button>
+                    <button
+                      className={persistLogClientId === clientId && bottomTab === "persistent" ? "active-action" : ""}
+                      onClick={() => loadPersistentLog(clientId)}
+                    >
+                      Persistent Log
+                    </button>
                     <button onClick={() => reconnectClient(clientId)}>Reconnect</button>
                     <button className="btn-restart" onClick={() => restartClient(clientId, false)}>Restart</button>
                     <button className="btn-restart" onClick={() => restartClient(clientId, true)}>Reset+Restart</button>
@@ -424,6 +468,12 @@ function App() {
               onClick={() => setBottomTab("msglog")}
             >
               Message Logs
+            </button>
+            <button
+              className={bottomTab === "persistent" ? "tab active-tab" : "tab"}
+              onClick={() => setBottomTab("persistent")}
+            >
+              Persistent Logs
             </button>
           </div>
 
@@ -549,6 +599,84 @@ function App() {
               )}
               <div className="meta">
                 Logs are written per send attempt. Failed sends show error reason. Entries expire after 7 days.
+              </div>
+            </>
+          )}
+
+          {bottomTab === "persistent" && (
+            <>
+              <div className="queue-lookup">
+                <input
+                  value={persistLogLookupId}
+                  onChange={(e) => setPersistLogLookupId(e.target.value)}
+                  placeholder="Enter clientId to view persistent logs"
+                />
+                <input
+                  type="date"
+                  value={persistLogFrom}
+                  onChange={(e) => setPersistLogFrom(e.target.value)}
+                />
+                <input
+                  type="date"
+                  value={persistLogTo}
+                  onChange={(e) => setPersistLogTo(e.target.value)}
+                />
+                <button
+                  onClick={() => loadPersistentLog(persistLogLookupId.trim())}
+                  disabled={!persistLogLookupId.trim() || persistLogLoading}
+                >
+                  Load
+                </button>
+              </div>
+              {!persistLogClientId && <div className="empty">Pick a client and click Load.</div>}
+              {persistLogClientId && (
+                <>
+                  <div className="queue-header">
+                    <div className="meta">
+                      Client: {persistLogClientId} · Matched: {persistLogData?.total ?? "-"} · Showing: {persistLogData?.returned ?? 0}
+                    </div>
+                    <div className="queue-actions">
+                      <button onClick={() => loadPersistentLog(persistLogClientId)} disabled={persistLogLoading}>
+                        {persistLogLoading ? "Loading..." : "Refresh"}
+                      </button>
+                      <button className="danger" onClick={() => deletePersistentLog(persistLogClientId)}>
+                        Delete Log File
+                      </button>
+                    </div>
+                  </div>
+                  {persistLogError && <div className="queue-error">{persistLogError}</div>}
+                  <div className="queue-list">
+                    {!persistLogLoading && persistLogData?.entries?.length === 0 && (
+                      <div className="empty">No entries in this date range.</div>
+                    )}
+                    {persistLogData?.entries?.map((entry, i) => {
+                      const ts = entry.sentAt ? new Date(entry.sentAt).toLocaleString() : "unknown"
+                      const isFailed = entry.status === "failed"
+                      return (
+                        <div
+                          key={`${i}-${entry.sentAt}`}
+                          className={`queue-item${isFailed ? " queue-item-failed" : ""}`}
+                        >
+                          <div className="queue-item-top">
+                            <span className={`status-badge ${isFailed ? "status-failed" : "status-sent"}`}>
+                              {entry.status || "unknown"}
+                            </span>
+                            <span className="meta">
+                              {entry.phoneNumber || "n/a"} · files: {entry.fileCount ?? 0} · {ts}
+                            </span>
+                          </div>
+                          {entry.text && <div className="queue-text">{entry.text}</div>}
+                          {isFailed && entry.failReason && (
+                            <div className="queue-text fail-reason">Error: {entry.failReason}</div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+              <div className="meta">
+                Persistent logs are written to disk with no TTL. Use date filters to narrow results. Delete removes the file permanently.
               </div>
             </>
           )}
