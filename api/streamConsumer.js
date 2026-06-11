@@ -5,6 +5,7 @@ const { info, warn, error, debug } = require("./logger")
 let redis = new Redis({
   host: process.env.REDIS_HOST || "redis",
   port: 6379,
+  password: process.env.REDIS_PASSWORD || undefined,
   retryStrategy(times) {
     return Math.min(times * 100, 2000)
   }
@@ -31,13 +32,13 @@ const messageFailures = new Map()
  * Initialize the consumer group
  * Creates the stream and consumer group if they don't exist
  */
-async function initializeConsumerGroup() {
+async function initializeConsumerGroup(startId = '$') {
   try {
     await redis.xgroup(
       'CREATE',
       STREAM_KEY,
       CONSUMER_GROUP,
-      '$',
+      startId,
       'MKSTREAM'
     )
   } catch (err) {
@@ -264,8 +265,11 @@ async function startConsumer() {
         
       } catch (err) {
         if (err.message && err.message.includes('NOGROUP')) {
+          // The group vanishing mid-run means the dataset was replaced
+          // (Redis restart/flush). Recreate from '0' so any events written
+          // after the wipe are still delivered instead of silently skipped.
           error(`❌ Consumer group disappeared, reinitializing...`)
-          await initializeConsumerGroup()
+          await initializeConsumerGroup('0')
         } else if (err.message && err.message.includes('timeout')) {
           continue
         } else if (err.message && err.message.includes('ECONNREFUSED')) {

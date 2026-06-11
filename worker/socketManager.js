@@ -48,6 +48,7 @@ const MSGLOG_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 const redis = new Redis({
   host: "redis",
   port: 6379,
+  password: process.env.REDIS_PASSWORD || undefined,
   enableOfflineQueue: true,
   maxRetriesPerRequest: 3
 })
@@ -56,6 +57,7 @@ const redis = new Redis({
 let redisPub = new Redis({
   host: "redis",
   port: 6379,
+  password: process.env.REDIS_PASSWORD || undefined,
   enableOfflineQueue: true,
   maxRetriesPerRequest: 3
 })
@@ -74,6 +76,7 @@ async function ensurePublishConnection() {
     redisPub = new Redis({
       host: "redis",
       port: 6379,
+      password: process.env.REDIS_PASSWORD || undefined,
       enableOfflineQueue: true,
       maxRetriesPerRequest: 3,
       connectTimeout: 5000,
@@ -550,6 +553,7 @@ async function startSenderLoop(clientId) {
   const queueRedis = new Redis({
     host: "redis",
     port: 6379,
+    password: process.env.REDIS_PASSWORD || undefined,
     enableOfflineQueue: true,
     maxRetriesPerRequest: null
   })

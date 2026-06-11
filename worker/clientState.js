@@ -1,7 +1,8 @@
 const Redis = require("ioredis")
 const redis = new Redis({
   host: "redis",
-  port: 6379
+  port: 6379,
+  password: process.env.REDIS_PASSWORD || undefined
 })
 
 const KEY = "wa:clients:state"

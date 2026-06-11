@@ -10,7 +10,8 @@ const SESSION_ROOT = process.env.WA_SESSIONS_DIR || "/sessions"
 
 const redis = new Redis({
   host: "redis",
-  port: 6379
+  port: 6379,
+  password: process.env.REDIS_PASSWORD || undefined
 })
 
 function shouldAutoRehydrateState(state) {
