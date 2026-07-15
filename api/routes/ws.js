@@ -4,11 +4,13 @@ const { warn, error } = require("../logger")
 
 async function sendClientSnapshot(socket, clientId) {
   const state = await redis.hget("wa:clients:state", clientId)
+  const queueCount = await redis.llen(`wa:pending:${clientId}`)
 
   socket.send(JSON.stringify({
     type: "status",
     clientId,
-    state: state || "NON_EXISTENT"
+    state: state || "NON_EXISTENT",
+    queueCount
   }))
   const qr = await redis.get(`wa:qr:${clientId}`)
   if (qr) {
