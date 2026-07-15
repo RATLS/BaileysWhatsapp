@@ -1,5 +1,6 @@
 const redis = require("../redis")
 const { normalizePhoneNumber } = require("../phone")
+const { broadcast } = require("../wsHub")
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0
@@ -43,7 +44,7 @@ module.exports = async function (fastify) {
       return res.code(400).send({ error: "Nothing to send" })
     }
 
-    await redis.lpush(
+    const newLen = await redis.lpush(
       `wa:pending:${clientId}`,
       JSON.stringify({
         type: "SEND_MESSAGE",
@@ -53,6 +54,7 @@ module.exports = async function (fastify) {
         files
       })
     )
+    broadcast(clientId, { type: "queueUpdate", clientId, queueCount: newLen })
 
     return { ok: true, queued: true }
   })

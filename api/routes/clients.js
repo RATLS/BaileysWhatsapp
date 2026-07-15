@@ -2,6 +2,7 @@ const redis = require("../redis")
 const fs = require("fs")
 const path = require("path")
 const readline = require("readline")
+const { broadcast } = require("../wsHub")
 
 const MSGLOGS_DIR = "/logs/msglogs"
 const STATE_KEY = "wa:clients:state"
@@ -198,6 +199,7 @@ module.exports = async function (fastify) {
     const queueKey = `wa:pending:${clientId}`
     const totalBefore = await redis.llen(queueKey)
     await redis.del(queueKey)
+    broadcast(clientId, { type: "queueUpdate", clientId, queueCount: 0 })
     return {
       ok: true,
       clientId,
