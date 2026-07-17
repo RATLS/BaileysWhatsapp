@@ -301,9 +301,10 @@
         <a href="#events"><span class="toc-num">06</span>Event pipeline</a>
         <a href="#redis"><span class="toc-num">07</span>Redis data model</a>
         <a href="#api"><span class="toc-num">08</span>API reference</a>
-        <a href="#deploy"><span class="toc-num">09</span>Deployment</a>
-        <a href="#gaps"><span class="toc-num">10</span>Known gaps</a>
-        <a href="#cookbook"><span class="toc-num">11</span>Cookbook</a>
+        <a href="#dashboard-guide"><span class="toc-num">09</span>Using the dashboard</a>
+        <a href="#deploy"><span class="toc-num">10</span>Deployment</a>
+        <a href="#gaps"><span class="toc-num">11</span>Known gaps</a>
+        <a href="#cookbook"><span class="toc-num">12</span>Cookbook</a>
       </div>
     </div>
   </nav>
@@ -471,7 +472,7 @@
         </div>
         <div class="card">
           <h4><span class="tag t-dash">dashboard</span> ops console</h4>
-          <p>React SPA + a small Express server. The server does two things beyond serving static files: HTTP Basic Auth gate, and a Docker-socket-backed <code>/api/logs</code> tail for worker/api/redis/dashboard containers.</p>
+          <p>React SPA + a small Express server. The server does two things beyond serving static files: an HTTP Basic Auth gate, and a Docker-socket-backed <code>GET /api/logs?service=&amp;tail=</code> endpoint for worker/api/redis/dashboard containers — wired and working server-side, but not currently called by anything in the React UI. See §09 for a full usage walkthrough.</p>
           <ul class="spec">
             <li><b>Auth</b><span>basic-auth, DASH_USER/DASH_PASS (default admin/admin, compose sets pass to change-me)</span></li>
             <li><b>Docker</b><span>mounts /var/run/docker.sock read-write to tail logs</span></li>
@@ -772,8 +773,88 @@
       </div>
     </section>
 
+    <section class="section" id="dashboard-guide">
+      <div class="eyebrow">09 · Using the dashboard</div>
+      <h2>What you actually see when you open it</h2>
+      <p class="lede">The dashboard is a single-page React app at <code>:8080</code>, sitting behind its own HTTP Basic Auth, that talks to <code>api</code> over plain REST — it never touches Redis or a Baileys socket directly. Everything below is read straight from <code>dashboard/src/App.jsx</code>, not the README's description of it.</p>
+      <p><b style="color:var(--ink)">In short:</b> one scrolling page, no sidebar, no tabs. A header with a login-gated API endpoint field, four small cards for overview/create/test-send/config, and one list of every known client with buttons that pop open a modal for that client's queue, logs, or history.</p>
+
+      <h3>Getting in</h3>
+      <div class="grid-2">
+        <div class="card">
+          <h4>1 · Basic Auth</h4>
+          <p>Visiting <code>:8080</code> immediately prompts for a username/password — this is <code>dashboard/server/index.js</code>'s <code>authMiddleware</code>, checked against <code>DASH_USER</code>/<code>DASH_PASS</code>. Code default is <code>admin</code>/<code>admin</code>; compose overrides the password to <code>change-me</code> but leaves the username as <code>admin</code>. Change both before any real deployment.</p>
+        </div>
+        <div class="card">
+          <h4>2 · Point it at the right API</h4>
+          <p>Once past auth, the header has an "API Endpoint" text field, defaulting to <code>http://localhost:3000</code>. It's saved to <code>localStorage</code> under the key <code>apiBase</code> automatically as you type — there's no separate save button. If it's wrong, there's no error banner: every request just fails silently (only logged to the browser console), so the counters and client list quietly stop updating. If nothing on the page seems to move, check this field first.</p>
+        </div>
+      </div>
+
+      <h3>The four top cards</h3>
+      <div class="grid-2">
+        <div class="card">
+          <h4>System Overview</h4>
+          <p>Three numbers: <b>Known Clients</b>, <b>Active Sockets</b>, <b>WS Connections</b> — pulled from <code>/debug/client-states</code>, <code>/debug/active-clients</code>, and <code>/debug/ws-stats</code> respectively.</p>
+        </div>
+        <div class="card">
+          <h4>Create New Client</h4>
+          <p>One text field (e.g. <code>client-123</code>) and a <b>Create</b> button, disabled only while the field is empty. Submits <code>POST /clients/:id</code> with no body. The server-side clientId format check (<code>^[a-zA-Z0-9._:-]{1,120}$</code>) isn't mirrored in the form — an invalid ID just surfaces as a generic failed-request error.</p>
+        </div>
+        <div class="card">
+          <h4>Send Test Message</h4>
+          <p>Client ID, phone number, and message text — three plain fields, text only, no file/media inputs in this form. <b>Queue Message</b> submits <code>POST /messages/send</code> with <code>files: []</code>. No confirmation and no success toast; the fields just clear, which <em>is</em> the success signal.</p>
+        </div>
+        <div class="card">
+          <h4>Send Delay</h4>
+          <p>Min ms / Max ms number inputs plus a line showing what's actually active right now: <code>Active: {minMs}ms – {maxMs}ms · source: default|redis</code>. <b>Save</b> posts to <code>/config/send-delay</code>; the button relabels to "Saving…" while in flight.</p>
+        </div>
+      </div>
+
+      <h3>The client list</h3>
+      <p>One row per known client, sorted alphabetically by ID (not by state or activity). Each row shows a state badge (<code>Created</code> / <code>Connecting</code> / <code>Scan QR</code> / <code>Connected</code> / <code>Disconnected</code> / <code>Logged Out</code> / <code>Stopped</code>, or the raw state string if something unrecognized shows up), a <code>● Live</code> badge if the client currently has an active socket, and a <code>{n} WS</code> badge showing how many open WebSocket subscribers are watching it right now.</p>
+
+      <div class="panel">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b>View group</b><span><b>Queue</b> · <b>Logs</b> · <b>History</b> — each opens its own modal for that client (see below). These are three separate buttons, not tabs inside one panel.</span></li>
+            <li><b>Control group</b><span><b>Reconnect</b> · <b>Restart</b> · <b>Reset+Restart</b> ("Wipe WhatsApp session then restart") — all fire immediately on click, no confirmation dialog.</span></li>
+            <li><b>Stop group</b><span><b>Stop</b> · <b>Reset+Stop</b> ("Wipe WhatsApp session then stop") · <b>Delete</b>. Only <b>Delete</b> asks first: <code>Delete client "{id}"? This cannot be undone.</code> Stop and Reset+Stop fire immediately, same as the control group.</span></li>
+          </ul>
+        </div>
+      </div>
+      <p class="muted" style="font-size:12.5px; margin-top:10px;"><b style="color:var(--ink)">Careful with this:</b> Reconnect, Restart, Reset+Restart, Stop, and Reset+Stop all execute the instant you click them. Only Delete, Clear Queue (inside the Queue modal), and Delete File (inside the History modal) ask <code>window.confirm</code> first. A misclick on Reset+Restart silently wipes a session with no undo prompt.</p>
+
+      <h3>The three modals</h3>
+      <div class="grid-3">
+        <div class="card">
+          <h4>Queue</h4>
+          <p>Loads <code>GET /clients/:id/queue?limit=100</code>. Shows pending count, each entry's index/type/phone/file-count/text, a Refresh button, and Clear Queue (confirms first, then <code>DELETE .../queue</code>). Empty state: "Queue is empty — no pending messages."</p>
+        </div>
+        <div class="card">
+          <h4>Logs</h4>
+          <p>Loads <code>GET /clients/:id/messages/log?limit=100</code> — the 7-day rolling <code>wa:msglog</code> history. Sent/failed status badge per row, <code>failReason</code> shown on failures. Footer reminder: "Logs auto-expire after 7 days." Refresh only, no date filtering.</p>
+        </div>
+        <div class="card">
+          <h4>History</h4>
+          <p>Loads <code>GET /clients/:id/logs/persistent</code> — the on-disk <code>.jsonl</code> mirror, with actual <b>from/to date-range inputs</b> (defaulting to today) and a Load button. Also has <b>Delete File</b> (confirms, then permanently deletes that client's log file). Footer note: "Persistent logs have no TTL" — unlike the 7-day Logs modal.</p>
+        </div>
+      </div>
+
+      <p style="margin-top:14px;">There's also a standalone lookup field above the client list — "Look up any client queue by ID…" — for checking the pending queue of a <code>clientId</code> that isn't in the known-clients list yet (e.g. one that was only ever enqueued to, never created). <b style="color:var(--ink)">It only opens the Queue modal</b> — there's no equivalent manual lookup for Logs or History.</p>
+
+      <div class="panel" style="margin-top:18px;">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b>Not actually realtime</b><span>The whole dashboard runs on a plain <code>setInterval(refreshAll, 5000)</code> — a 5-second REST poll of the debug endpoints. It never opens <code>GET /ws</code> itself, despite that endpoint existing for exactly this purpose. A state change can take up to ~5s to show up here, unlike a page using the WebSocket directly.</span></li>
+            <li><b>Container log tailing isn't wired up yet</b><span><code>dashboard/server/index.js</code> exposes a working <code>GET /api/logs?service=worker|api|redis|dashboard&amp;tail=&lt;n, capped 2000&gt;</code> backed by the mounted Docker socket — but nothing in the current React UI calls it. The backend capability described in §Docker above exists and works if you hit it directly; there's just no button for it today.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
     <section class="section" id="deploy">
-      <div class="eyebrow">09 · Deployment topology</div>
+      <div class="eyebrow">10 · Deployment topology</div>
       <h2>Docker, and how this repo uses it</h2>
       <p class="lede">The whole stack runs as Docker containers, wired together by <code>docker-compose.yaml</code>. If Docker itself is new to you, start with the plain-English version below; the rest of this section is the specifics of this repo's setup.</p>
 
@@ -909,7 +990,7 @@
     </section>
 
     <section class="section" id="gaps">
-      <div class="eyebrow">10 · Known gaps</div>
+      <div class="eyebrow">11 · Known gaps</div>
       <h2>Current realities, not future tickets</h2>
       <p class="lede">Pulled directly from <code>AGENTS.md</code> §19 and cross-checked against the code. These are operational facts to design around, not bugs waiting for a PR.</p>
 
@@ -927,7 +1008,7 @@
     </section>
 
     <section class="section" id="cookbook">
-      <div class="eyebrow">11 · Cookbook</div>
+      <div class="eyebrow">12 · Cookbook</div>
       <h2>Common operations</h2>
       <p class="lede">Copy, adjust the host/clientId, run. Assumes the self-signed origin cert, hence <code>-k</code>.</p>
 
