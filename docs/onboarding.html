@@ -774,8 +774,25 @@
 
     <section class="section" id="deploy">
       <div class="eyebrow">09 · Deployment topology</div>
-      <h2>docker-compose.yaml, read as a map</h2>
-      <p class="lede">Only two ports reach the host. Everything else — including Redis and the API's own port 3000 — lives inside the compose network.</p>
+      <h2>Docker, and how this repo uses it</h2>
+      <p class="lede">The whole stack runs as Docker containers, wired together by <code>docker-compose.yaml</code>. If Docker itself is new to you, start with the plain-English version below; the rest of this section is the specifics of this repo's setup.</p>
+
+      <div class="grid-3">
+        <div class="card">
+          <h4>Container</h4>
+          <p>A running process boxed off from the host and from every other container — its own filesystem, its own installed packages, its own view of "localhost." <code>worker</code> can crash or leak memory without touching <code>api</code>'s process at all.</p>
+        </div>
+        <div class="card">
+          <h4>Image</h4>
+          <p>The frozen recipe a container is started from — built once by a <code>Dockerfile</code> (install Node, copy source, set the startup command), then reused every time that container starts or restarts.</p>
+        </div>
+        <div class="card">
+          <h4>Volume / bind mount</h4>
+          <p>A folder that lives <em>outside</em> the container and survives even if the container is deleted and recreated. This repo uses this deliberately for anything that must not vanish on a rebuild — see "things to remember" below.</p>
+        </div>
+      </div>
+
+      <p style="margin-top:18px;"><b style="color:var(--ink)">In short:</b> <code>docker-compose.yaml</code> is the wiring diagram — it says which five images to build, what to name each running container, which folders to mount into which container, which ports reach the host machine, and which containers must be healthy before another one is allowed to start. Only two ports reach the host; everything else — including Redis and the API's own port 3000 — stays inside the private compose network.</p>
 
       <div class="grid-2">
         <div class="compose-card">
@@ -797,6 +814,65 @@
         <div class="compose-card">
           <div class="svc-name">redis <span class="port-tag internal">no host port, by design</span></div>
           <p class="muted" style="font-size:12.5px; margin-top:8px;"><code>requirepass</code> + <code>maxmemory 140mb volatile-lru</code> + AOF <code>appendfsync everysec</code> + <code>save 60 1000</code> + <code>maxclients 100</code>. Data in named volume <code>redis-data</code>.</p>
+        </div>
+      </div>
+
+      <h3>How each image gets built</h3>
+      <p class="muted" style="font-size:13px;">All three app images (<code>worker</code>, <code>api</code>, <code>dashboard</code>) start from <code>node:20-alpine</code> — the small Alpine Linux variant of the official Node image.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h4>worker/Dockerfile</h4>
+          <p>Single stage: install deps, copy source, run. Node's heap is capped at <code>512MB</code> via <code>--max-old-space-size</code> on the start command — set as a node flag, not <code>NODE_OPTIONS</code>, so a bad flag fails loudly at startup instead of the container silently crash-looping. A <code>HEALTHCHECK</code> reads the heartbeat file worker writes every 30s and fails the container "unhealthy" if it's gone stale.</p>
+        </div>
+        <div class="card">
+          <h4>api/Dockerfile</h4>
+          <p>Same single-stage pattern as worker, no <code>HEALTHCHECK</code> defined — compose only waits on <code>redis</code>'s healthcheck before starting <code>api</code>, not the reverse.</p>
+        </div>
+        <div class="card">
+          <h4>dashboard/Dockerfile</h4>
+          <p>Two stages. Stage one installs deps and runs <code>npm run build</code> to compile the React app. Stage two starts from a fresh <code>node:20-alpine</code> and copies over only the built <code>dist/</code>, the small Express <code>server/</code>, and <code>node_modules</code> — the React build toolchain itself never ships in the final image.</p>
+        </div>
+      </div>
+
+      <h3>Things to remember when working with this stack</h3>
+      <div class="panel">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b>Sessions live outside the image</b><span>WhatsApp login state is bind-mounted at <code>./sessions</code>, not baked into the worker image. Delete or lose that folder and every client has to scan a fresh QR — rebuilding or recreating the worker container does <em>not</em> do this by itself, but wiping the mount does.</span></li>
+            <li><b>Don't reach for <code>-v</code> casually</b><span><code>docker compose down</code> is safe — named volumes and bind mounts survive. <code>docker compose down -v</code> also deletes the <code>redis-data</code> volume, which throws away client state, queues, and the send-delay config (though not the session files themselves, since those are a bind mount, not a volume).</span></li>
+            <li><b>Rebuild only what changed</b><span>After editing one service's code: <code>docker compose up -d --build worker</code> (or <code>api</code>/<code>dashboard</code>) rebuilds just that image and restarts just that container — no need to take down the whole stack.</span></li>
+            <li><b>The 1G worker limit is a ceiling, not a target</b><span>Node's own heap is capped at 512MB, but Baileys/Signal state, buffered media, and native memory sit outside the JS heap — real usage climbs with concurrent connected clients. Watch this if you add more clients than the stack was sized for.</span></li>
+            <li><b><code>service_healthy</code> gates startup order</b><span>Both <code>worker</code> and <code>api</code> wait for Redis's <code>healthcheck</code> (a <code>redis-cli ping</code>) before starting — not just for the Redis container to exist. If Redis is slow to come up, dependent containers wait rather than crash-looping against a closed connection.</span></li>
+            <li><b>Cert rotation needs a forced recreate</b><span>Nginx reads the mounted cert files once at container start. After replacing <code>nginx/certs/origin.{crt,key}</code>: <code>docker compose up -d --force-recreate proxy</code> — a plain restart of the stack won't necessarily pick up new files depending on how they were replaced.</span></li>
+            <li><b>The dashboard's Docker socket mount is real host access</b><span><code>/var/run/docker.sock</code> is mounted into the dashboard container so it can tail other containers' logs — but that socket is effectively root-equivalent control over the whole Docker host. Treat dashboard credentials with the same seriousness as host SSH access, not just "an admin panel password."</span></li>
+            <li><b>Redis has no host port on purpose</b><span>The compose file's own comment explains why: an earlier config published 6379 to the internet and an unauthenticated <code>REPLICAOF</code> hijack wiped the dataset repeatedly. Don't add a <code>ports:</code> mapping back onto the <code>redis</code> service.</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Session storage — what's actually in <code>/sessions</code></h3>
+      <p><b style="color:var(--ink)">In short:</b> a "session" is WhatsApp's saved login for one phone number — the cryptographic keys that let the socket reconnect silently instead of asking for a fresh QR scan every time. It lives as plain files on disk, one folder per <code>clientId</code>, mounted in from outside the container so it survives restarts and rebuilds.</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4>How it's created and read</h4>
+          <p>Baileys' own <code>useMultiFileAuthState(sessionPath)</code> — called in <code>initClient()</code> against <code>/sessions/&lt;clientId&gt;</code> — creates the folder on first connect if it doesn't exist, and hands back a <code>state</code> object plus a <code>saveCreds()</code> callback that <code>socketManager.js</code> wires to Baileys' <code>creds.update</code> event so every credential rotation is persisted immediately, not just on clean shutdown.</p>
+        </div>
+        <div class="card">
+          <h4>What's actually in the folder</h4>
+          <p>Not one file — many small ones, one JSON file per stored key: <code>creds.json</code> (the account identity), plus a growing set of <code>pre-key-*.json</code>, <code>session-*.json</code>, <code>sender-key-*.json</code>, <code>app-state-sync-key-*.json</code> and <code>app-state-sync-version-*.json</code> files as the Signal protocol negotiates keys with each chat. Every read/write is guarded by an in-process file lock, so concurrent credential updates can't corrupt a file mid-write.</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b><code>creds.json</code> is the crown jewel</b><span>It holds the account's identity and signing keys. Lose only this file and the effect is identical to a full logout — a fresh QR scan is required. The other files are protocol bookkeeping that Baileys rebuilds automatically as conversations resume.</span></li>
+            <li><b>These files ARE the login — treat them like credentials</b><span>Anyone with read access to <code>/sessions/&lt;clientId&gt;</code> can impersonate that WhatsApp number without ever seeing a QR code. There's no password layered on top of the filesystem permissions. Back it up encrypted if at all, and never commit it, log it, or ship it in a support bundle.</span></li>
+            <li><b>Deleted wholesale, never partially</b><span><code>worker/sessionUtils.js: clearSession()</code> does a recursive delete of the whole <code>/sessions/&lt;clientId&gt;</code> folder. It runs automatically on <code>LOGGED_OUT</code> (a fresh QR is coming anyway) and on any restart/stop/delete called with <code>resetSession: true</code>. Ordinary disconnects and reconnect backoff never touch these files — that's <em>why</em> a transient network blip doesn't force a rescan.</span></li>
+            <li><b>The bind mount is the only thing making sessions durable</b><span>Compose mounts <code>./sessions:/sessions</code> on the worker (see §Docker above) specifically so this folder outlives container rebuilds. If that mount is ever missing or points somewhere new, every client looks freshly logged-out on next start — the code has no fallback location.</span></li>
+            <li><b>A real path inconsistency to know about</b><span><code>worker/startupRehydrate.js</code> honors <code>WA_SESSIONS_DIR</code> (default <code>/sessions</code>) when scanning which clients to rehydrate on boot — but <code>socketManager.js</code>'s <code>initClient()</code> and <code>sessionUtils.js</code>'s <code>clearSession()</code> both hardcode the literal string <code>/sessions/&lt;clientId&gt;</code>. Setting <code>WA_SESSIONS_DIR</code> to anything else without also moving the bind mount will make startup rehydration scan the wrong folder while live reads/writes keep hitting <code>/sessions</code>.</span></li>
+          </ul>
         </div>
       </div>
 
