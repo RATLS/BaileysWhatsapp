@@ -1,0 +1,1302 @@
+<title>Baileys Worker/API — Systems Schematic</title>
+<style>
+  @font-face { font-family: 'sys-mono'; src: local('SF Mono'), local('Cascadia Code'), local('JetBrains Mono'); }
+
+  :root{
+    --bg:#0A121D; --panel:#0F1B2B; --panel-2:#132238; --grid:#17263c;
+    --ink:#E7EEF5; --muted:#7E90A8; --faint:#4A5A72;
+    --line:#6FD3F7; --line-dim:#2E5872;
+    --green:#3ED98A; --amber:#F5A623; --red:#FF6B6B; --violet:#B99CF2;
+    --border:#213652; --border-strong:#33526f;
+    --mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Roboto Mono', Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#EEF3F8; --panel:#FFFFFF; --panel-2:#F5F9FC; --grid:#DCE7F0;
+      --ink:#0E2338; --muted:#4E6478; --faint:#8CA0B3;
+      --line:#0E6FA8; --line-dim:#BFDCEC;
+      --green:#0E8F53; --amber:#B5720A; --red:#C13A3A; --violet:#6A4FB0;
+      --border:#CBDBE8; --border-strong:#9FBBCF;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0A121D; --panel:#0F1B2B; --panel-2:#132238; --grid:#17263c;
+    --ink:#E7EEF5; --muted:#7E90A8; --faint:#4A5A72;
+    --line:#6FD3F7; --line-dim:#2E5872;
+    --green:#3ED98A; --amber:#F5A623; --red:#FF6B6B; --violet:#B99CF2;
+    --border:#213652; --border-strong:#33526f;
+  }
+  :root[data-theme="light"]{
+    --bg:#EEF3F8; --panel:#FFFFFF; --panel-2:#F5F9FC; --grid:#DCE7F0;
+    --ink:#0E2338; --muted:#4E6478; --faint:#8CA0B3;
+    --line:#0E6FA8; --line-dim:#BFDCEC;
+    --green:#0E8F53; --amber:#B5720A; --red:#C13A3A; --violet:#6A4FB0;
+    --border:#CBDBE8; --border-strong:#9FBBCF;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0; background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0/32px 32px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/32px 32px,
+      var(--bg);
+    color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{ background:var(--line); color:var(--bg); }
+  a{ color:var(--line); }
+  code, .mono{ font-family:var(--mono); }
+  .wrap{ max-width:100%; overflow-x:hidden; }
+
+  .skip{ position:absolute; left:-9999px; }
+  .skip:focus{ left:8px; top:8px; z-index:999; background:var(--panel); padding:8px 12px; border:1px solid var(--line); border-radius:4px; }
+
+  :focus-visible{ outline:2px solid var(--line); outline-offset:2px; }
+
+  /* ---- shell layout ---- */
+  .shell{ display:grid; grid-template-columns:264px minmax(0,1fr); min-height:100vh; }
+  @media (max-width: 980px){ .shell{ grid-template-columns:1fr; } }
+
+  /* ---- sidebar ---- */
+  .sidebar{
+    position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    border-right:1px solid var(--border); background:var(--panel);
+    padding:22px 0 40px;
+  }
+  @media (max-width: 980px){
+    .sidebar{ position:static; height:auto; border-right:none; border-bottom:1px solid var(--border); }
+  }
+  .brand{ padding:0 20px 18px; border-bottom:1px solid var(--border); margin-bottom:14px; }
+  .brand-mark{ display:flex; align-items:center; gap:10px; }
+  .brand-dot{ width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); animation:pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  .brand-title{ font-family:var(--mono); font-weight:600; letter-spacing:.02em; font-size:13.5px; }
+  .brand-sub{ color:var(--muted); font-size:11.5px; margin-top:6px; font-family:var(--mono); }
+  .theme-toggle{
+    margin-top:12px; display:flex; gap:6px; font-family:var(--mono); font-size:10.5px;
+  }
+  .theme-toggle button{
+    flex:1; background:var(--panel-2); border:1px solid var(--border); color:var(--muted);
+    padding:5px 6px; border-radius:3px; cursor:pointer; letter-spacing:.06em; text-transform:uppercase;
+  }
+  .theme-toggle button.active{ color:var(--line); border-color:var(--line-dim); }
+
+  .toc{ padding:0 10px; }
+  .toc-group{ margin-bottom:4px; }
+  .toc a{
+    display:flex; gap:9px; align-items:baseline; text-decoration:none; color:var(--muted);
+    padding:7px 10px; border-radius:4px; font-size:12.6px; border-left:2px solid transparent;
+  }
+  .toc a:hover{ color:var(--ink); background:var(--panel-2); }
+  .toc a.active{ color:var(--ink); border-left-color:var(--line); background:var(--panel-2); }
+  .toc-num{ font-family:var(--mono); color:var(--faint); font-size:10.5px; min-width:20px; }
+  .toc a.active .toc-num{ color:var(--line); }
+
+  /* ---- main ---- */
+  main{ min-width:0; padding-bottom:100px; }
+  .section{ padding:64px 48px 8px; max-width:1180px; }
+  @media (max-width: 640px){ .section{ padding:44px 18px 8px; } }
+  .section + .section{ border-top:1px dashed var(--border); }
+
+  .eyebrow{
+    font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--line); display:flex; align-items:center; gap:10px; margin-bottom:14px;
+  }
+  .eyebrow::before{ content:''; width:22px; height:1px; background:var(--line); }
+  h1,h2,h3{ font-family:var(--mono); font-weight:600; letter-spacing:-.01em; margin:0 0 14px; color:var(--ink); }
+  h2{ font-size:26px; }
+  h3{ font-size:16px; margin-top:30px; color:var(--ink); }
+  p{ color:var(--ink); max-width:74ch; }
+  p.lede{ color:var(--muted); font-size:16px; max-width:68ch; }
+  .muted{ color:var(--muted); }
+  small.foot{ color:var(--faint); font-size:11.5px; font-family:var(--mono); }
+
+  /* ---- hero ---- */
+  .hero{ padding:70px 48px 20px; position:relative; }
+  @media (max-width: 640px){ .hero{ padding:50px 18px 10px; } }
+  .hero h1{
+    font-size:clamp(30px, 4.6vw, 52px); line-height:1.05; max-width:16ch; margin-bottom:18px;
+  }
+  .hero h1 em{ font-style:normal; color:var(--line); }
+  .hero-grid{ display:grid; grid-template-columns:1.05fr .95fr; gap:34px; align-items:start; margin-top:36px; }
+  @media (max-width: 980px){ .hero-grid{ grid-template-columns:1fr; } }
+  .hero-stats{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:26px; max-width:520px; }
+  .stat{ border:1px solid var(--border); border-radius:6px; padding:12px 14px; background:var(--panel); }
+  .stat b{ display:block; font-family:var(--mono); font-size:20px; color:var(--line); }
+  .stat span{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:8px; position:relative;
+  }
+  .panel::before, .panel::after{
+    content:''; position:absolute; width:9px; height:9px; border:1px solid var(--border-strong); top:-1px;
+  }
+  .panel::before{ left:-1px; border-right:none; border-bottom:none; }
+  .panel::after{ right:-1px; border-left:none; border-bottom:none; }
+  .panel-title{
+    display:flex; justify-content:space-between; align-items:center; padding:10px 16px;
+    border-bottom:1px solid var(--border); font-family:var(--mono); font-size:11px;
+    letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+  }
+  .panel-body{ padding:16px; }
+
+  /* ---- schematic ---- */
+  .flow-controls{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
+  .flow-btn{
+    font-family:var(--mono); font-size:11px; letter-spacing:.03em; padding:6px 12px; border-radius:20px;
+    border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer;
+  }
+  .flow-btn[data-color="green"].active{ border-color:var(--green); color:var(--green); background:color-mix(in srgb, var(--green) 10%, transparent); }
+  .flow-btn[data-color="line"].active{ border-color:var(--line); color:var(--line); background:color-mix(in srgb, var(--line) 10%, transparent); }
+  .flow-btn[data-color="violet"].active{ border-color:var(--violet); color:var(--violet); background:color-mix(in srgb, var(--violet) 10%, transparent); }
+  svg text{ font-family:var(--mono); }
+  .node-box{ fill:var(--panel-2); stroke:var(--border-strong); stroke-width:1; }
+  .node-label{ fill:var(--ink); font-size:11px; font-weight:600; }
+  .node-sub{ fill:var(--muted); font-size:9px; }
+  .edge{ fill:none; stroke:var(--line-dim); stroke-width:1.4; }
+  .pulse-dot{ opacity:0; }
+  .flow-caption{ font-size:12.5px; color:var(--muted); margin-top:10px; min-height:36px; }
+  .flow-caption b{ color:var(--ink); }
+
+  /* ---- cards / grid ---- */
+  .grid-3{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:18px; }
+  .grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:18px; }
+  @media (max-width: 860px){ .grid-3, .grid-2{ grid-template-columns:1fr; } }
+  .card{ border:1px solid var(--border); border-radius:8px; padding:16px 18px; background:var(--panel); }
+  .card h4{ font-family:var(--mono); font-size:13px; margin:0 0 8px; color:var(--ink); display:flex; align-items:center; gap:8px; }
+  .card p{ font-size:13px; color:var(--muted); margin:0; }
+  .tag{ display:inline-block; font-family:var(--mono); font-size:9.5px; letter-spacing:.05em; padding:2px 7px; border-radius:20px; border:1px solid currentColor; }
+  .tag.t-api{ color:var(--line); } .tag.t-worker{ color:var(--green); } .tag.t-dash{ color:var(--violet); } .tag.t-infra{ color:var(--amber); }
+
+  ul.spec{ list-style:none; margin:10px 0 0; padding:0; }
+  ul.spec li{ padding:6px 0; border-top:1px solid var(--border); font-size:12.5px; display:flex; gap:8px; }
+  ul.spec li:first-child{ border-top:none; }
+  ul.spec b{ font-family:var(--mono); color:var(--ink); min-width:90px; font-weight:600; }
+  ul.spec span{ color:var(--muted); }
+
+  /* ---- lifecycle diagram ---- */
+  .lc-wrap{ display:grid; grid-template-columns:1.5fr 1fr; gap:16px; margin-top:20px; align-items:start; }
+  @media (max-width: 980px){ .lc-wrap{ grid-template-columns:1fr; } }
+  .lc-node{ cursor:pointer; }
+  .lc-node rect{ fill:var(--panel-2); stroke:var(--border-strong); stroke-width:1.2; rx:6; transition:stroke .15s, fill .15s; }
+  .lc-node.selected rect{ stroke:var(--line); stroke-width:2; fill:color-mix(in srgb, var(--line) 8%, var(--panel-2)); }
+  .lc-node text{ fill:var(--ink); font-size:11px; font-weight:600; }
+  .lc-node .dot{ }
+  .lc-edge{ fill:none; stroke:var(--line-dim); stroke-width:1.3; marker-end:url(#arrow); }
+  .lc-edge.highlight{ stroke:var(--line); stroke-width:2; }
+  .lc-edge-label{ fill:var(--faint); font-size:8.5px; font-family:var(--mono); }
+  .lc-detail{ min-height:320px; }
+  .lc-detail h4{ font-family:var(--mono); font-size:14px; margin:0 0 4px; }
+  .lc-detail .kind{ font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:14px; display:block; }
+  .lc-detail dl{ margin:0; }
+  .lc-detail dt{ font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-top:14px; }
+  .lc-detail dd{ margin:4px 0 0; font-size:13px; }
+  .lc-detail code{ background:var(--panel-2); padding:1px 5px; border-radius:3px; font-size:12px; border:1px solid var(--border); }
+
+  /* ---- redis table ---- */
+  .search-row{ display:flex; gap:10px; margin:18px 0 12px; }
+  .search-row input{
+    flex:1; background:var(--panel); border:1px solid var(--border); color:var(--ink); padding:9px 12px;
+    border-radius:6px; font-family:var(--mono); font-size:13px;
+  }
+  .search-row input::placeholder{ color:var(--faint); }
+  table.keys{ width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.keys th{
+    text-align:left; font-family:var(--mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--muted); border-bottom:1px solid var(--border-strong); padding:8px 10px;
+  }
+  table.keys td{ padding:10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  table.keys tr:hover td{ background:var(--panel-2); }
+  table.keys .k{ font-family:var(--mono); color:var(--line); white-space:nowrap; }
+  table.keys .ty{ font-family:var(--mono); font-size:11px; color:var(--amber); white-space:nowrap; }
+  table.keys .ttl{ font-family:var(--mono); font-size:11px; color:var(--muted); white-space:nowrap; }
+  .row-hidden{ display:none; }
+
+  /* ---- API reference ---- */
+  .api-group{ margin-top:22px; }
+  .api-group-title{ font-family:var(--mono); font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:8px; }
+  details.endpoint{ border:1px solid var(--border); border-radius:7px; margin-bottom:8px; background:var(--panel); overflow:hidden; }
+  details.endpoint[open]{ border-color:var(--border-strong); }
+  details.endpoint summary{
+    list-style:none; cursor:pointer; padding:12px 16px; display:flex; align-items:center; gap:12px; font-family:var(--mono); font-size:12.5px;
+  }
+  details.endpoint summary::-webkit-details-marker{ display:none; }
+  details.endpoint summary::after{ content:'+'; margin-left:auto; color:var(--faint); font-size:16px; }
+  details.endpoint[open] summary::after{ content:'–'; }
+  .method{ font-family:var(--mono); font-size:10.5px; font-weight:700; padding:3px 8px; border-radius:4px; letter-spacing:.03em; }
+  .method.get{ background:color-mix(in srgb, var(--line) 18%, transparent); color:var(--line); }
+  .method.post{ background:color-mix(in srgb, var(--green) 18%, transparent); color:var(--green); }
+  .method.delete{ background:color-mix(in srgb, var(--red) 18%, transparent); color:var(--red); }
+  .path{ color:var(--ink); }
+  .endpoint-body{ padding:0 16px 16px; border-top:1px solid var(--border); }
+  .endpoint-body p{ font-size:13px; color:var(--muted); margin:12px 0; }
+  pre.block{
+    background:var(--panel-2); border:1px solid var(--border); border-radius:6px; padding:12px 14px;
+    font-family:var(--mono); font-size:12px; overflow-x:auto; margin:8px 0; line-height:1.55;
+  }
+  .pill-row{ display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  .pill{ font-family:var(--mono); font-size:10.5px; background:var(--panel-2); border:1px solid var(--border); padding:2px 8px; border-radius:4px; color:var(--muted); }
+
+  /* ---- media decision tool ---- */
+  .mtool{ display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:18px; }
+  @media (max-width: 860px){ .mtool{ grid-template-columns:1fr; } }
+  .mtool-controls label{ display:block; font-family:var(--mono); font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:14px 0 6px; }
+  .mtool-controls select, .mtool-controls input[type=range]{ width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--ink); padding:8px; border-radius:5px; font-family:var(--mono); }
+  .mtool-result{ font-family:var(--mono); font-size:12.5px; white-space:pre-wrap; }
+  .mtool-result .step{ padding:8px 10px; border-left:2px solid var(--line); margin-bottom:8px; background:var(--panel-2); border-radius:0 5px 5px 0; }
+
+  /* ---- deployment ---- */
+  .compose-card{ border:1px solid var(--border); border-radius:8px; padding:14px 16px; background:var(--panel); }
+  .compose-card .svc-name{ font-family:var(--mono); font-weight:700; color:var(--ink); font-size:13px; }
+  .port-tag{ font-family:var(--mono); font-size:10px; padding:2px 6px; border-radius:4px; border:1px solid var(--amber); color:var(--amber); }
+  .port-tag.internal{ border-color:var(--faint); color:var(--faint); }
+
+  /* ---- gaps ---- */
+  .gap-item{ display:flex; gap:12px; padding:12px 0; border-top:1px solid var(--border); }
+  .gap-item:first-child{ border-top:none; }
+  .gap-sev{ font-family:var(--mono); font-size:9.5px; padding:3px 7px; border-radius:4px; height:fit-content; white-space:nowrap; letter-spacing:.04em; }
+  .gap-sev.high{ background:color-mix(in srgb, var(--red) 18%, transparent); color:var(--red); }
+  .gap-sev.med{ background:color-mix(in srgb, var(--amber) 18%, transparent); color:var(--amber); }
+
+  /* ---- cookbook ---- */
+  .cmd{ position:relative; }
+  .copy-btn{
+    position:absolute; top:8px; right:8px; background:var(--panel); border:1px solid var(--border); color:var(--muted);
+    font-family:var(--mono); font-size:10px; padding:4px 8px; border-radius:4px; cursor:pointer;
+  }
+  .copy-btn:hover{ color:var(--ink); border-color:var(--border-strong); }
+  .copy-btn.copied{ color:var(--green); border-color:var(--green); }
+
+  footer{ padding:40px 48px 60px; color:var(--faint); font-family:var(--mono); font-size:11.5px; }
+</style>
+
+<div class="wrap">
+<a class="skip" href="#hero">Skip to content</a>
+<div class="shell">
+
+  <nav class="sidebar" aria-label="Table of contents">
+    <div class="brand">
+      <div class="brand-mark">
+        <div class="brand-dot" aria-hidden="true"></div>
+        <div class="brand-title">BAILEYS//SCHEMATIC</div>
+      </div>
+      <div class="brand-sub">redis-orchestrated wa worker</div>
+      <div class="theme-toggle" role="group" aria-label="Theme">
+        <button data-set-theme="dark">Dark</button>
+        <button data-set-theme="light">Light</button>
+        <button data-set-theme="" class="active">Auto</button>
+      </div>
+    </div>
+    <div class="toc" id="toc">
+      <div class="toc-group">
+        <a href="#hero"><span class="toc-num">00</span>Overview</a>
+        <a href="#primer"><span class="toc-num">★</span>Start here (plain English)</a>
+        <a href="#mental-model"><span class="toc-num">01</span>Mental model</a>
+        <a href="#services"><span class="toc-num">02</span>Service map</a>
+        <a href="#lifecycle"><span class="toc-num">03</span>Client lifecycle</a>
+        <a href="#queue"><span class="toc-num">04</span>Message queue</a>
+        <a href="#media"><span class="toc-num">05</span>Media send logic</a>
+        <a href="#events"><span class="toc-num">06</span>Event pipeline</a>
+        <a href="#redis"><span class="toc-num">07</span>Redis data model</a>
+        <a href="#api"><span class="toc-num">08</span>API reference</a>
+        <a href="#deploy"><span class="toc-num">09</span>Deployment</a>
+        <a href="#gaps"><span class="toc-num">10</span>Known gaps</a>
+        <a href="#cookbook"><span class="toc-num">11</span>Cookbook</a>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main-content">
+
+    <section class="hero" id="hero">
+      <div class="eyebrow">Onboarding · internal reference</div>
+      <h1>One socket per client.<br>One queue per client.<br><em>Zero surprises, if you read this.</em></h1>
+      <p class="lede">This is the complete runtime model of the Baileys WhatsApp worker/API stack: what owns a socket, what guarantees the outbound queue makes, how state gets from a Baileys event to a browser tab, and every Redis key the system depends on. Every diagram below is wired directly to the code — click things.</p>
+
+      <div class="hero-stats">
+        <div class="stat"><b>5</b><span>compose services</span></div>
+        <div class="stat"><b>7+1</b><span>lifecycle states</span></div>
+        <div class="stat"><b>9</b><span>redis keys in play</span></div>
+      </div>
+
+      <div class="hero-grid">
+        <div class="panel">
+          <div class="panel-title">
+            <span>system schematic — live</span>
+            <span id="flow-status" class="mono">idle</span>
+          </div>
+          <div class="panel-body">
+            <div class="flow-controls">
+              <button class="flow-btn" data-color="line" data-flow="lifecycle">① client lifecycle</button>
+              <button class="flow-btn" data-color="green" data-flow="message">② outbound message</button>
+              <button class="flow-btn" data-color="violet" data-flow="event">③ realtime event</button>
+            </div>
+            <svg id="schematic" viewBox="0 0 720 340" width="100%" role="img" aria-label="Architecture schematic showing dashboard, api, redis, worker and WhatsApp, with three animated data flows">
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill="var(--line-dim)"></path>
+                </marker>
+              </defs>
+              <!-- nodes -->
+              <g id="n-dash"><rect class="node-box" x="10" y="140" width="110" height="54" rx="6"/><text class="node-label" x="65" y="163" text-anchor="middle">dashboard</text><text class="node-sub" x="65" y="178" text-anchor="middle">:8080 · basic auth</text></g>
+              <g id="n-api"><rect class="node-box" x="185" y="140" width="110" height="54" rx="6"/><text class="node-label" x="240" y="163" text-anchor="middle">api</text><text class="node-sub" x="240" y="178" text-anchor="middle">fastify :3000</text></g>
+              <g id="n-redis"><rect class="node-box" x="360" y="30" width="110" height="54" rx="6"/><text class="node-label" x="415" y="53" text-anchor="middle">redis</text><text class="node-sub" x="415" y="68" text-anchor="middle">state·queue·stream</text></g>
+              <g id="n-worker"><rect class="node-box" x="360" y="250" width="110" height="54" rx="6"/><text class="node-label" x="415" y="273" text-anchor="middle">worker</text><text class="node-sub" x="415" y="288" text-anchor="middle">baileys sockets</text></g>
+              <g id="n-wa"><rect class="node-box" x="560" y="250" width="130" height="54" rx="6"/><text class="node-label" x="625" y="273" text-anchor="middle">WhatsApp</text><text class="node-sub" x="625" y="288" text-anchor="middle">multi-device ws</text></g>
+              <g id="n-browser"><rect class="node-box" x="560" y="30" width="130" height="54" rx="6"/><text class="node-label" x="625" y="53" text-anchor="middle">browser</text><text class="node-sub" x="625" y="68" text-anchor="middle">GET /ws</text></g>
+
+              <!-- edges -->
+              <path id="e-dash-api" class="edge" d="M120,167 L185,167"/>
+              <path id="e-api-redis" class="edge" d="M262,140 C262,100 320,90 360,66"/>
+              <path id="e-redis-worker" class="edge" d="M400,84 C380,140 380,200 400,250"/>
+              <path id="e-worker-wa" class="edge" d="M470,277 L560,277"/>
+              <path id="e-worker-redis" class="edge" d="M430,250 C450,200 450,140 430,84"/>
+              <path id="e-redis-api" class="edge" d="M368,70 C330,90 280,110 260,140"/>
+              <path id="e-api-browser" class="edge" d="M295,155 C420,155 500,90 560,58"/>
+            </svg>
+            <div class="flow-caption" id="flow-caption">Pick a flow above — pulses trace the exact path that code takes.</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title"><span>read this first</span></div>
+          <div class="panel-body">
+            <ul class="spec">
+              <li><b>Control plane</b><span>api writes commands + queue items into Redis. It never touches a Baileys socket directly.</span></li>
+              <li><b>Execution plane</b><span>worker owns every Baileys socket, drains queues, writes state.</span></li>
+              <li><b>Source of truth</b><span>Redis. If Redis and a process disagree, Redis wins — both sides re-sync from it.</span></li>
+              <li><b>Auth</b><span>none, on the api itself. Dashboard has basic auth; the API behind nginx does not.</span></li>
+              <li><b>Sessions</b><span>Baileys multi-file auth state on disk at <code>/sessions/&lt;clientId&gt;</code>, bind-mounted so it survives worker restarts.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="primer">
+      <div class="eyebrow">★ Start here</div>
+      <h2>The whole system, no jargon</h2>
+      <p class="lede">Read this section first if any of BRPOP, XADD, JID, or "consumer group" mean nothing to you yet. Everything below still holds — this is just the same ideas in plain words before the technical detail.</p>
+
+      <div class="grid-3">
+        <div class="card">
+          <h4>What is Baileys?</h4>
+          <p>A library that lets a normal Node.js program log into WhatsApp the same way the WhatsApp phone app does — no official Business API account needed. You scan a QR code once, and from then on the program can send and receive messages as that phone number.</p>
+        </div>
+        <div class="card">
+          <h4>What is a "socket" here?</h4>
+          <p>One open, logged-in connection to WhatsApp for one phone number. Think of it like a phone call that's been left connected — as long as it's open, that number can send messages. Each client (each phone number the system manages) gets its own socket.</p>
+        </div>
+        <div class="card">
+          <h4>Why is Redis everywhere?</h4>
+          <p>Redis is a shared whiteboard both <code>api</code> and <code>worker</code> can read and write. Instead of the two programs calling each other directly (which gets messy and fragile), <code>api</code> writes a note on the whiteboard ("please connect client-1") and <code>worker</code> checks the whiteboard and acts on it. Neither has to know the other is even running.</p>
+        </div>
+        <div class="card">
+          <h4>What is "the queue"?</h4>
+          <p>A waiting line for outgoing messages, stored in Redis. When you ask the system to send a message, it doesn't send right away — it joins the line for that phone number. A dedicated helper process for that number pulls messages off the front of the line one at a time, but only while that number is actually connected.</p>
+        </div>
+        <div class="card">
+          <h4>How does the dashboard "see" status in realtime?</h4>
+          <p>Your browser keeps one connection open to the api (a WebSocket — like a phone line, not a series of phone calls). Whenever the worker changes a client's status (connecting, QR ready, connected, etc.), that change gets relayed down the same open line, so the page updates itself without you refreshing.</p>
+        </div>
+        <div class="card">
+          <h4>Why split "api" and "worker" at all?</h4>
+          <p>Holding a live WhatsApp socket open is fragile — it can crash, disconnect, or need a QR rescan. Keeping that risky work in one dedicated process (<code>worker</code>) means the public-facing <code>api</code> can be restarted, redeployed, or scaled without ever dropping a live WhatsApp session.</p>
+        </div>
+      </div>
+
+      <h3>Jargon, decoded</h3>
+      <p class="muted" style="font-size:13px;">You'll see these Redis and messaging terms throughout the rest of this doc. Come back here if you lose the thread.</p>
+      <table class="keys">
+        <thead><tr><th>Term</th><th>In plain English</th></tr></thead>
+        <tbody>
+          <tr><td class="k">LPUSH / RPUSH</td><td>Add an item to one end of a waiting list stored in Redis (left end / right end).</td></tr>
+          <tr><td class="k">BRPOP</td><td>"Wait here until something shows up in this list, then take it." Used so the sender loop doesn't have to keep checking — it just sleeps until there's work.</td></tr>
+          <tr><td class="k">XADD / stream</td><td>Add an entry to an append-only log (a Redis Stream) that multiple readers can each track their own read-position in — like a group chat's message history.</td></tr>
+          <tr><td class="k">Consumer group</td><td>A named "reading position bookmark" on a stream, so if the reader process restarts, it knows exactly where it left off instead of re-reading everything or missing entries.</td></tr>
+          <tr><td class="k">XACK</td><td>"I successfully handled this stream entry, you can stop tracking it as unfinished."</td></tr>
+          <tr><td class="k">DLQ (dead-letter queue)</td><td>A side list for entries that repeatedly failed to process — a way to set them aside instead of retrying forever or silently losing them.</td></tr>
+          <tr><td class="k">JID</td><td>WhatsApp's internal address format for a chat, e.g. <code>91999999999@s.whatsapp.net</code> — the phone number plus a suffix saying what kind of chat it is.</td></tr>
+          <tr><td class="k">TTL</td><td>"Time to live" — how long a piece of data is allowed to sit in Redis before it's automatically deleted.</td></tr>
+          <tr><td class="k">MIME type</td><td>A short label describing what kind of file something is (e.g. <code>image/jpeg</code>, <code>application/pdf</code>), used here to decide whether a file can carry a text caption.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section" id="mental-model">
+      <div class="eyebrow">01 · Mental model</div>
+      <h2>Three flows, not one big pipeline</h2>
+      <p class="lede">Nearly everything the system does decomposes into one of three flows. Internalize these and the rest of the codebase reads as detail, not surprise.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h4><span class="tag t-api" style="color:var(--line)">①</span> Client lifecycle</h4>
+          <p><code>api</code> writes a command → <code>worker</code> starts or mutates a socket → <code>worker</code> writes state + publishes an event → <code>api</code>'s stream consumer broadcasts it to subscribed WebSocket clients.</p>
+        </div>
+        <div class="card">
+          <h4><span class="tag t-worker" style="color:var(--green)">②</span> Outbound message</h4>
+          <p><code>api</code> validates input → LPUSH onto <code>wa:pending:&lt;clientId&gt;</code> → worker's per-client sender loop blocks on BRPOP until the client is connected → dequeues and sends exactly one job at a time.</p>
+        </div>
+        <div class="card">
+          <h4><span class="tag t-dash" style="color:var(--violet)">③</span> Realtime event</h4>
+          <p>worker XADDs status/QR events to <code>wa:events:stream</code> → api's consumer group validates + XACKs → valid events broadcast through <code>wsHub</code> to client-scoped WebSocket subscribers.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="services">
+      <div class="eyebrow">02 · Service map</div>
+      <h2>Five containers, one Redis</h2>
+      <p class="lede">Every service is a thin, single-purpose process. None of them contain business logic that spans more than one of the three flows above.</p>
+      <p><b style="color:var(--ink)">In short:</b> five small programs, each doing one job — <code>worker</code> talks to WhatsApp, <code>api</code> talks to the outside world, <code>dashboard</code> gives a human something to click, <code>proxy</code> handles HTTPS, and <code>redis</code> is the shared memory all of them read and write to.</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4><span class="tag t-worker">worker</span> owns every socket</h4>
+          <p>Listens on <code>wa:commands</code> (BRPOP), initializes one Baileys socket per <code>clientId</code>, tracks connection lifecycle, publishes QR/status events, runs a dedicated sender loop per client, clears session files on logout/reset.</p>
+          <ul class="spec">
+            <li><b>Entry</b><span>worker/index.js</span></li>
+            <li><b>Core</b><span>worker/socketManager.js (759 lines — read this first)</span></li>
+            <li><b>Startup</b><span>worker/startupRehydrate.js rebuilds sockets after a restart</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4><span class="tag t-api">api</span> the only public surface</h4>
+          <p>Fastify app exposing REST + <code>GET /ws</code>. Validates and enqueues; never opens a Baileys socket. Also runs the Redis Streams consumer that fan-outs events to WebSocket subscribers.</p>
+          <ul class="spec">
+            <li><b>Entry</b><span>api/index.js — registers websocket, cors(origin:true), routes, starts stream consumer</span></li>
+            <li><b>CORS</b><span>permissive by design today — see §10</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4><span class="tag t-dash">dashboard</span> ops console</h4>
+          <p>React SPA + a small Express server. The server does two things beyond serving static files: HTTP Basic Auth gate, and a Docker-socket-backed <code>/api/logs</code> tail for worker/api/redis/dashboard containers.</p>
+          <ul class="spec">
+            <li><b>Auth</b><span>basic-auth, DASH_USER/DASH_PASS (default admin/admin, compose sets pass to change-me)</span></li>
+            <li><b>Docker</b><span>mounts /var/run/docker.sock read-write to tail logs</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4><span class="tag t-infra">proxy</span> nginx TLS edge</h4>
+          <p>Only container publishing 443 to the host (besides dashboard's 8080). Terminates TLS, proxies <code>/</code> and <code>/ws</code> to <code>api:3000</code> with upgrade headers and 3600s read/send timeouts for long-lived sockets.</p>
+        </div>
+      </div>
+
+      <h3>Redis — not just a cache</h3>
+      <p>Redis is the command bus, the queue store, the state store, the QR cache, and the event stream — all five. Compose hardens it deliberately: <code>requirepass</code>, <code>maxmemory 140mb</code> with <code>volatile-lru</code> eviction, AOF persistence (<code>appendfsync everysec</code>), and <b>no host port mapping</b> — a comment in <code>docker-compose.yaml</code> notes an earlier config exposed 6379 to the internet and got its dataset wiped via <code>REPLICAOF</code> hijack. It is only reachable inside the compose network today.</p>
+    </section>
+
+    <section class="section" id="lifecycle">
+      <div class="eyebrow">03 · Client lifecycle</div>
+      <h2>The state machine, exactly as coded</h2>
+      <p class="lede">Every transition below is taken from <code>worker/socketManager.js</code>'s <code>connection.update</code> handler and the four command handlers. Click a state to see what the worker actually does on entry — Redis writes, published events, and what triggers the next hop.</p>
+      <p><b style="color:var(--ink)">In short:</b> every WhatsApp connection moves through a fixed set of stages, like a traffic light — created, connecting, waiting for a QR scan, connected, disconnected, logged out, or manually stopped. The worker reacts differently depending which stage a client is in, and Redis always holds the current stage so any process can check it.</p>
+
+      <div class="lc-wrap">
+        <div class="panel">
+          <div class="panel-body">
+            <svg id="lc-svg" viewBox="0 0 760 480" width="100%" role="img" aria-label="Client lifecycle state diagram">
+              <defs>
+                <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill="var(--line-dim)"></path>
+                </marker>
+              </defs>
+              <g id="lc-edges"></g>
+              <g id="lc-nodes"></g>
+            </svg>
+          </div>
+        </div>
+        <div class="panel lc-detail">
+          <div class="panel-title"><span>state detail</span></div>
+          <div class="panel-body" id="lc-detail-body">
+            <p class="muted mono" style="font-size:12.5px;">← click a state on the diagram</p>
+          </div>
+        </div>
+      </div>
+      <p class="muted" style="font-size:12.5px; margin-top:14px;"><b style="color:var(--ink)">Note on "retry cap":</b> the README calls attempt-8 a "retry cap," but there is no hard stop in the code. Backoff simply plateaus — <code>min(15000×attempt, 120000)</code> for known-recoverable transport codes (405/408/428), <code>min(3000×attempt, 30000)</code> otherwise — and the worker keeps reconnecting indefinitely with the <em>same preserved session</em>. Nothing forces a fresh QR just because the counter grew.</p>
+    </section>
+
+    <section class="section" id="queue">
+      <div class="eyebrow">04 · Outbound message queue</div>
+      <h2>The single most important contract in the system</h2>
+      <p class="lede"><code>POST /messages/send</code> never sends anything. It validates and pushes a job onto a per-client Redis list. A dedicated sender loop per client is the only thing that ever calls <code>sock.sendMessage</code>.</p>
+      <p><b style="color:var(--ink)">In short:</b> asking the system to send a message just joins a waiting line — it doesn't send instantly. A separate helper for that specific phone number works through its own line, one message at a time, and only while that number is actually connected. If a send fails, the message goes back to the front of the line and gets tried again later.</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4>Enqueue — <code>api/routes/messages.js</code></h4>
+          <p>Validation, in order: <code>clientId</code> non-empty string · <code>phoneNumber</code> present and normalizes via <code>libphonenumber-js</code> (tries international parse first, falls back to region <code>IN</code>) · <code>files</code> must be an array, each needs non-empty <code>file_url</code> + <code>mimeType</code> · at least one of trimmed <code>text</code> or <code>files</code> must exist.</p>
+          <pre class="block">LPUSH wa:pending:&lt;clientId&gt;
+{
+  "type": "SEND_MESSAGE",
+  "clientId": "client-1",
+  "phoneNumber": "919999999999",  // e164, no +
+  "text": "hello",
+  "files": []
+}</pre>
+          <p>A <code>queueUpdate</code> event with the new list length is broadcast directly through <code>wsHub</code> — this one bypasses the Redis Stream entirely.</p>
+        </div>
+        <div class="card">
+          <h4>Dequeue — <code>worker/socketManager.js: startSenderLoop</code></h4>
+          <p>One loop per client, started as soon as <code>initClient</code> runs (even before connection) so nothing is missed after a worker restart. Each loop owns a <em>dedicated</em> ioredis connection — <code>BRPOP</code> blocks, and one blocking connection can't be shared across clients.</p>
+          <pre class="block">loop:
+  if (!sock || !connectedClients.has(id)):
+      sleep(2000); continue        // never dequeues while disconnected
+  BRPOP wa:pending:&lt;id&gt; 0          // blocks until a job exists
+  jid = toJid(phoneNumber)         // bad number → log "failed", DROP (not requeued)
+  send via sendMessageWithMedia()
+  on success: logMessage(sent); sleep(random(minMs,maxMs))
+  on failure: logMessage(failed, failReason); RPUSH job back; sleep(3000)</pre>
+        </div>
+      </div>
+
+      <h3>What "reliable" actually means here</h3>
+      <div class="grid-3">
+        <div class="card"><h4>Sequential, always</h4><p>One job in flight per client. No parallel sends, no fan-out — a slow send simply delays the next dequeue.</p></div>
+        <div class="card"><h4>Requeue on send failure</h4><p>A thrown error from <code>sock.sendMessage</code> RPUSHes the raw job back onto the same list, which — since consumption is BRPOP from the tail — makes it the very next item retried. No counter, no cap: it retries forever.</p></div>
+        <div class="card"><h4>Invalid phone ≠ retry</h4><p>A number that fails <code>toJid()</code> normalization is logged as <code>failed</code> and <b>dropped permanently</b> — it never reaches <code>sock.sendMessage</code>, so it is not requeued. This is a real distinction from "send failure."</p></div>
+      </div>
+
+      <h3>Send delay — <code>wa:config:sendDelay</code></h3>
+      <p>After every successful send the loop sleeps <code>randomBetween(minMs, maxMs)</code> before the next BRPOP. Config is read fresh every cycle from Redis; both API and worker independently clamp and validate it the same way, so a malformed value in Redis can never break the loop.</p>
+      <table class="keys" style="max-width:520px;">
+        <tr><td class="k">default</td><td>3000ms – 8000ms</td></tr>
+        <tr><td class="k">allowed range</td><td>500ms – 120000ms (clamped)</td></tr>
+        <tr><td class="k">fallback trigger</td><td>key absent, unparsable JSON, or min &gt; max</td></tr>
+      </table>
+    </section>
+
+    <section class="section" id="media">
+      <div class="eyebrow">05 · Media send logic</div>
+      <h2>What actually gets sent, decided live</h2>
+      <p class="lede"><code>worker/mediaSender.js</code> branches on file count and MIME type. Set the inputs below to see the exact Baileys message shape it produces — this mirrors the function precisely, no fabricated behavior.</p>
+
+      <div class="mtool">
+        <div class="panel">
+          <div class="panel-title"><span>inputs</span></div>
+          <div class="panel-body mtool-controls">
+            <label for="m-files">File count</label>
+            <input id="m-files" type="range" min="0" max="3" step="1" value="1">
+            <div class="mono muted" id="m-files-val" style="font-size:12px;margin-top:4px;">1 file</div>
+
+            <label for="m-mime">MIME type (first / only file)</label>
+            <select id="m-mime">
+              <option value="image/jpeg">image/jpeg</option>
+              <option value="video/mp4">video/mp4</option>
+              <option value="audio/ogg">audio/ogg</option>
+              <option value="application/pdf">application/pdf</option>
+            </select>
+
+            <label><input type="checkbox" id="m-text" checked style="width:auto;margin-right:8px;">Text caption present</label>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>resulting sock.sendMessage() calls</span></div>
+          <div class="panel-body mtool-result" id="m-result"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="events">
+      <div class="eyebrow">06 · Realtime event pipeline</div>
+      <h2>From a Baileys callback to a browser repaint</h2>
+      <p class="lede">Four hops, each with its own failure handling. This is the path QR codes and connection-state changes travel.</p>
+      <p><b style="color:var(--ink)">In short:</b> think of it like a newspaper subscription. The worker publishes a headline ("client-1 is now connected") to a shared feed in Redis. The api reads that feed and, if the headline is valid, delivers it straight down the open WebSocket line to whichever browser tab is watching that client — usually within milliseconds.</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4>1 · Publish — <code>worker: publishEvent()</code></h4>
+          <p><code>XADD wa:events:stream MAXLEN ~ 10000 * data &lt;json&gt;</code> over a dedicated publisher connection, raced against a 10s timeout. Retried once on failure for QR events specifically.</p>
+        </div>
+        <div class="card">
+          <h4>2 · Consume — <code>api/streamConsumer.js</code></h4>
+          <p>Consumer group <code>api-consumers</code>, stable consumer name <code>api-main</code> (env <code>WA_EVENTS_CONSUMER_NAME</code>) — stable on purpose, so a restarted API reclaims its own pending entries immediately instead of waiting on cross-consumer autoclaim. Safe because compose runs exactly one <code>api</code> container.</p>
+        </div>
+        <div class="card">
+          <h4>3 · Validate + ack</h4>
+          <p>A message is valid only if it has a <code>data</code> field, that field parses as JSON, and the parsed object has both <code>clientId</code> and <code>type</code>. Valid → broadcast then <code>XACK</code>. Invalid → failure counter increments <b>in-memory</b>, keyed by message ID.</p>
+        </div>
+        <div class="card">
+          <h4>4 · Poison → DLQ</h4>
+          <p>After <code>WA_EVENTS_POISON_THRESHOLD</code> (default <code>5</code>) failed attempts, the message is copied to <code>wa:events:dlq</code> and then acked off the main stream anyway — it will never block the pipeline. <b>Caveat:</b> failure counters live in a JS <code>Map</code>, so an API restart resets a message's strike count to zero.</p>
+        </div>
+      </div>
+
+      <h3>Recovery on restart</h3>
+      <p>On boot the consumer runs <code>processPendingMessages()</code> (own pending entries from id <code>0</code>) then <code>claimAndProcessStalePendingMessages()</code> (<code>XAUTOCLAIM</code>, min-idle <code>10000ms</code>, batch <code>50</code>) before entering the main <code>XREADGROUP BLOCK 1000</code> loop. The main loop re-runs autoclaim every <code>15000ms</code> so a stalled/restarted consumer's entries are never stuck until the next deploy. If the consumer group itself vanishes (<code>NOGROUP</code> — usually a Redis wipe), it's recreated from <code>'0'</code>, not <code>'$'</code>, so nothing written during the gap is silently skipped.</p>
+
+      <h3>WebSocket delivery — <code>GET /ws</code></h3>
+      <p>The first inbound message on a socket must include <code>clientId</code>; that's what subscribes it via <code>wsHub</code>. Every (re)subscription pushes an immediate snapshot: current state from <code>wa:clients:state</code> plus <code>queueCount</code> and, if present, the live QR. Ping frames get a pong <em>and</em> a fresh snapshot resync — deliberate self-healing against any broadcast that got dropped in transit.</p>
+      <pre class="block">→ {"clientId":"client-1","type":"ping"}
+← {"type":"pong","timestamp":1710000000000}
+← {"type":"status","clientId":"client-1","state":"CONNECTED","queueCount":0}</pre>
+    </section>
+
+    <section class="section" id="redis">
+      <div class="eyebrow">07 · Redis data model</div>
+      <h2>Every key the system reads or writes</h2>
+      <p class="lede">Nine Redis keys plus two on-disk stores. This is the complete contract — nothing else persists client state.</p>
+      <p><b style="color:var(--ink)">In short:</b> everything the system "remembers" lives in one of the rows below. If you're debugging something that seems stuck or missing, the answer is almost always sitting in one of these keys — check here before guessing.</p>
+      <div class="search-row">
+        <input type="text" id="key-search" placeholder="Filter by key, type, or owner…" aria-label="Filter Redis keys">
+      </div>
+      <div style="overflow-x:auto;">
+      <table class="keys" id="key-table">
+        <thead><tr><th>Key</th><th>Type</th><th>TTL</th><th>Written by</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="k">wa:clients:state</td><td class="ty">hash</td><td class="ttl">none</td><td>api (create), worker (all transitions)</td><td>clientId → current lifecycle state. Field removed entirely on delete.</td></tr>
+          <tr><td class="k">wa:commands</td><td class="ty">list</td><td class="ttl">none</td><td>api routes (LPUSH)</td><td>Worker command bus. BRPOP'd by <code>commandListener.js</code>. Payloads: ADD_CLIENT / RESTART_CLIENT / STOP_CLIENT / DELETE_CLIENT.</td></tr>
+          <tr><td class="k">wa:pending:&lt;clientId&gt;</td><td class="ty">list</td><td class="ttl">none</td><td>api (LPUSH), worker (RPUSH on retry)</td><td>Per-client outbound message queue. BRPOP'd by that client's sender loop only.</td></tr>
+          <tr><td class="k">wa:qr:&lt;clientId&gt;</td><td class="ty">string</td><td class="ttl">120s</td><td>worker</td><td>Latest QR payload. Deleted on connect, logout, or delete.</td></tr>
+          <tr><td class="k">wa:clients:active</td><td class="ty">set</td><td class="ttl">none</td><td>worker (markActive/markInactive)</td><td>Which clientIds currently have a live, worker-owned socket.</td></tr>
+          <tr><td class="k">wa:events:stream</td><td class="ty">stream</td><td class="ttl">MAXLEN~10000</td><td>worker (XADD), debug route</td><td>QR/status/test events. Consumed by group <code>api-consumers</code>.</td></tr>
+          <tr><td class="k">wa:events:dlq</td><td class="ty">stream</td><td class="ttl">none</td><td>api/streamConsumer.js</td><td>Poison messages that failed processing 5× (configurable). Name overridable via <code>WA_EVENTS_DLQ_STREAM</code>.</td></tr>
+          <tr><td class="k">wa:config:sendDelay</td><td class="ty">string (json)</td><td class="ttl">none</td><td>api (POST /config/send-delay)</td><td><code>{minMs,maxMs}</code>, clamped 500–120000. Read fresh by worker every send cycle.</td></tr>
+          <tr><td class="k">wa:msglog:&lt;clientId&gt;</td><td class="ty">sorted set</td><td class="ttl">rolling 7d</td><td>worker (logMessage)</td><td>Score = sentAt ms. One entry per dequeued job, sent or failed. Trimmed via ZREMRANGEBYSCORE + PEXPIRE on every write. <b>Not</b> deleted by deleteClient.</td></tr>
+          <tr><td class="k">/sessions/&lt;clientId&gt;/*</td><td class="ty">filesystem</td><td class="ttl">none</td><td>Baileys useMultiFileAuthState</td><td>Auth credentials + signal keys. Bind-mounted at <code>./sessions</code>. Wiped by <code>clearSession()</code> on logout/reset.</td></tr>
+          <tr><td class="k">/logs/msglogs/&lt;clientId&gt;.jsonl</td><td class="ty">filesystem</td><td class="ttl">none</td><td>worker (logMessage, append-only)</td><td>Unbounded-history mirror of msglog. Powers the dashboard's "History" date-range view; deletable via API.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section class="section" id="api">
+      <div class="eyebrow">08 · API reference</div>
+      <h2>Every route, exactly as validated</h2>
+      <p class="lede">All routes live under <code>api/routes/</code>. None require authentication at this layer — see §10.</p>
+
+      <div class="api-group">
+        <div class="api-group-title">Client lifecycle</div>
+
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/clients</span></summary>
+          <div class="endpoint-body"><p>Returns the raw <code>wa:clients:state</code> hash — every known clientId and its state, unfiltered.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/clients/:clientId</span></summary>
+          <div class="endpoint-body">
+            <p>Validates clientId against <code>^[a-zA-Z0-9._:-]{1,120}$</code>. Returns <code>409</code> if the client already exists — no state reset on conflict.</p>
+            <pre class="block">200 { ok: true, clientId }
+409 { error: "Client already exists", clientId, state }
+400 { error: "Invalid clientId format" }</pre>
+            <p>Writes <code>CREATED</code> to the state hash, then enqueues <code>ADD_CLIENT</code>.</p>
+          </div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/clients/:clientId/reconnect</span></summary>
+          <div class="endpoint-body"><p>Gatekept: only allowed from <code>LOGGED_OUT</code>, <code>DISCONNECTED</code>, or <code>STOPPED</code>. Enqueues <code>ADD_CLIENT</code>.</p>
+          <pre class="block">400 { error: "Client must be LOGGED_OUT, DISCONNECTED, or STOPPED" }</pre></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/clients/:clientId/restart</span></summary>
+          <div class="endpoint-body"><p>Body: <code>{ resetSession?: boolean }</code>. Enqueues <code>RESTART_CLIENT</code> — tears down the socket, optionally wipes session files, immediately reinitializes.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/clients/:clientId/stop</span></summary>
+          <div class="endpoint-body"><p>Body: <code>{ resetSession?: boolean }</code>. Enqueues <code>STOP_CLIENT</code> — tears down the socket, sets state <code>STOPPED</code>. No auto-reconnect.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method delete">DELETE</span><span class="path">/clients/:clientId</span></summary>
+          <div class="endpoint-body"><p>Enqueues <code>DELETE_CLIENT</code> — removes the state hash field, session files, QR key, pending queue. Publishes a <code>DELETED</code> event (event-only, never a persisted state). <code>wa:msglog</code> history is deliberately preserved.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/clients/:clientId/status</span></summary>
+          <div class="endpoint-body"><pre class="block">200 { state: "CONNECTED" }
+200 { clientId, state: "NON_EXISTENT" }   // when unknown</pre></div>
+        </details>
+      </div>
+
+      <div class="api-group">
+        <div class="api-group-title">Queue &amp; messages</div>
+
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/messages/send</span></summary>
+          <div class="endpoint-body">
+            <p>Body: <code>{ clientId, phoneNumber, text?, files? }</code>. Validates and LPUSHes onto <code>wa:pending:&lt;clientId&gt;</code> — see §04 for the full contract.</p>
+            <pre class="block">200 { ok: true, queued: true }
+400 { error: "Missing fields" | "Nothing to send" | "files must be an array" | ... }</pre>
+          </div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/clients/:clientId/queue?limit=1-200</span></summary>
+          <div class="endpoint-body"><pre class="block">{ clientId, total, returned, limit, messages: [{ index, raw, parsed }] }</pre></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method delete">DELETE</span><span class="path">/clients/:clientId/queue</span></summary>
+          <div class="endpoint-body"><p>Drops the entire pending list and broadcasts a <code>queueUpdate</code> event with count 0.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/clients/:clientId/messages/log?limit=&amp;before=</span></summary>
+          <div class="endpoint-body">
+            <p>Reads <code>wa:msglog:&lt;clientId&gt;</code>, newest first. <code>limit</code> 1–200 (default 50). <code>before</code> is a Unix-ms cursor (default <code>+inf</code>).</p>
+            <pre class="block">{ clientId, total, returned, limit,
+  messages: [{ phoneNumber, sentAt, status, text, fileCount, failReason? }] }
+// malformed entries → { raw, parseError: true } — never throws</pre>
+          </div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/clients/:clientId/logs/persistent?from=&amp;to=&amp;limit=</span></summary>
+          <div class="endpoint-body"><p>Streams and filters the <code>.jsonl</code> file on disk by date range (up to 500 rows, newest first). Reads the whole file with <code>readline</code> — no index.</p></div>
+        </details>
+
+        <details class="endpoint"><summary><span class="method delete">DELETE</span><span class="path">/clients/:clientId/logs/persistent</span></summary>
+          <div class="endpoint-body"><p>Permanently deletes the on-disk <code>.jsonl</code> log file for that client.</p></div>
+        </details>
+      </div>
+
+      <div class="api-group">
+        <div class="api-group-title">Config &amp; misc</div>
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/config/send-delay</span></summary>
+          <div class="endpoint-body"><pre class="block">{ minMs, maxMs, source: "default" | "redis" }</pre></div>
+        </details>
+        <details class="endpoint"><summary><span class="method post">POST</span><span class="path">/config/send-delay</span></summary>
+          <div class="endpoint-body"><p>Body: <code>{ minMs, maxMs }</code>, clamped 500–120000. <code>400</code> if max &lt; min after clamping.</p></div>
+        </details>
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/ws</span> <span class="pill">websocket</span></summary>
+          <div class="endpoint-body"><p>Subscribes on the first message containing <code>clientId</code>. See §06 for the ping/snapshot protocol.</p></div>
+        </details>
+        <details class="endpoint"><summary><span class="method get">GET</span><span class="path">/health</span></summary>
+          <div class="endpoint-body"><pre class="block">{ status: "ok" }</pre></div>
+        </details>
+      </div>
+
+      <div class="api-group">
+        <div class="api-group-title">Debug (operational, not hardened admin APIs)</div>
+        <div class="pill-row">
+          <span class="pill">GET /debug/ws-stats</span>
+          <span class="pill">GET /debug/client-states</span>
+          <span class="pill">GET /debug/active-clients</span>
+          <span class="pill">POST /debug/test-broadcast/:clientId</span>
+          <span class="pill">GET /debug/qr/:clientId</span>
+          <span class="pill">GET /debug/pending/:clientId</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="deploy">
+      <div class="eyebrow">09 · Deployment topology</div>
+      <h2>Docker, and how this repo uses it</h2>
+      <p class="lede">The whole stack runs as Docker containers, wired together by <code>docker-compose.yaml</code>. If Docker itself is new to you, start with the plain-English version below; the rest of this section is the specifics of this repo's setup.</p>
+
+      <div class="grid-3">
+        <div class="card">
+          <h4>Container</h4>
+          <p>A running process boxed off from the host and from every other container — its own filesystem, its own installed packages, its own view of "localhost." <code>worker</code> can crash or leak memory without touching <code>api</code>'s process at all.</p>
+        </div>
+        <div class="card">
+          <h4>Image</h4>
+          <p>The frozen recipe a container is started from — built once by a <code>Dockerfile</code> (install Node, copy source, set the startup command), then reused every time that container starts or restarts.</p>
+        </div>
+        <div class="card">
+          <h4>Volume / bind mount</h4>
+          <p>A folder that lives <em>outside</em> the container and survives even if the container is deleted and recreated. This repo uses this deliberately for anything that must not vanish on a rebuild — see "things to remember" below.</p>
+        </div>
+      </div>
+
+      <p style="margin-top:18px;"><b style="color:var(--ink)">In short:</b> <code>docker-compose.yaml</code> is the wiring diagram — it says which five images to build, what to name each running container, which folders to mount into which container, which ports reach the host machine, and which containers must be healthy before another one is allowed to start. Only two ports reach the host; everything else — including Redis and the API's own port 3000 — stays inside the private compose network.</p>
+
+      <div class="grid-2">
+        <div class="compose-card">
+          <div class="svc-name">proxy <span class="port-tag">443 → host</span></div>
+          <p class="muted" style="font-size:12.5px; margin-top:8px;">nginx:1.27-alpine. TLS via <code>nginx/certs/origin.{crt,key}</code>. Proxies <code>/</code> and <code>/ws</code> to <code>api:3000</code>, 3600s timeouts for the websocket route.</p>
+        </div>
+        <div class="compose-card">
+          <div class="svc-name">dashboard <span class="port-tag">8080 → host</span></div>
+          <p class="muted" style="font-size:12.5px; margin-top:8px;">Mounts <code>/var/run/docker.sock</code> to tail container logs. 100M memory limit.</p>
+        </div>
+        <div class="compose-card">
+          <div class="svc-name">api <span class="port-tag internal">3000 · internal only</span></div>
+          <p class="muted" style="font-size:12.5px; margin-top:8px;">Mounts <code>./logs:/logs</code>. Depends on redis being <code>service_healthy</code>. 100M memory limit — it's a thin router.</p>
+        </div>
+        <div class="compose-card">
+          <div class="svc-name">worker <span class="port-tag internal">no ports</span></div>
+          <p class="muted" style="font-size:12.5px; margin-top:8px;">Mounts <code>./sessions:/sessions</code> and <code>./logs:/logs</code>. 1G memory limit — Baileys sockets + Signal state add up per client. Liveness heartbeat file at <code>/tmp/worker-heartbeat</code>, rewritten every 30s.</p>
+        </div>
+        <div class="compose-card">
+          <div class="svc-name">redis <span class="port-tag internal">no host port, by design</span></div>
+          <p class="muted" style="font-size:12.5px; margin-top:8px;"><code>requirepass</code> + <code>maxmemory 140mb volatile-lru</code> + AOF <code>appendfsync everysec</code> + <code>save 60 1000</code> + <code>maxclients 100</code>. Data in named volume <code>redis-data</code>.</p>
+        </div>
+      </div>
+
+      <h3>How each image gets built</h3>
+      <p class="muted" style="font-size:13px;">All three app images (<code>worker</code>, <code>api</code>, <code>dashboard</code>) start from <code>node:20-alpine</code> — the small Alpine Linux variant of the official Node image.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h4>worker/Dockerfile</h4>
+          <p>Single stage: install deps, copy source, run. Node's heap is capped at <code>512MB</code> via <code>--max-old-space-size</code> on the start command — set as a node flag, not <code>NODE_OPTIONS</code>, so a bad flag fails loudly at startup instead of the container silently crash-looping. A <code>HEALTHCHECK</code> reads the heartbeat file worker writes every 30s and fails the container "unhealthy" if it's gone stale.</p>
+        </div>
+        <div class="card">
+          <h4>api/Dockerfile</h4>
+          <p>Same single-stage pattern as worker, no <code>HEALTHCHECK</code> defined — compose only waits on <code>redis</code>'s healthcheck before starting <code>api</code>, not the reverse.</p>
+        </div>
+        <div class="card">
+          <h4>dashboard/Dockerfile</h4>
+          <p>Two stages. Stage one installs deps and runs <code>npm run build</code> to compile the React app. Stage two starts from a fresh <code>node:20-alpine</code> and copies over only the built <code>dist/</code>, the small Express <code>server/</code>, and <code>node_modules</code> — the React build toolchain itself never ships in the final image.</p>
+        </div>
+      </div>
+
+      <h3>Things to remember when working with this stack</h3>
+      <div class="panel">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b>Sessions live outside the image</b><span>WhatsApp login state is bind-mounted at <code>./sessions</code>, not baked into the worker image. Delete or lose that folder and every client has to scan a fresh QR — rebuilding or recreating the worker container does <em>not</em> do this by itself, but wiping the mount does.</span></li>
+            <li><b>Don't reach for <code>-v</code> casually</b><span><code>docker compose down</code> is safe — named volumes and bind mounts survive. <code>docker compose down -v</code> also deletes the <code>redis-data</code> volume, which throws away client state, queues, and the send-delay config (though not the session files themselves, since those are a bind mount, not a volume).</span></li>
+            <li><b>Rebuild only what changed</b><span>After editing one service's code: <code>docker compose up -d --build worker</code> (or <code>api</code>/<code>dashboard</code>) rebuilds just that image and restarts just that container — no need to take down the whole stack.</span></li>
+            <li><b>The 1G worker limit is a ceiling, not a target</b><span>Node's own heap is capped at 512MB, but Baileys/Signal state, buffered media, and native memory sit outside the JS heap — real usage climbs with concurrent connected clients. Watch this if you add more clients than the stack was sized for.</span></li>
+            <li><b><code>service_healthy</code> gates startup order</b><span>Both <code>worker</code> and <code>api</code> wait for Redis's <code>healthcheck</code> (a <code>redis-cli ping</code>) before starting — not just for the Redis container to exist. If Redis is slow to come up, dependent containers wait rather than crash-looping against a closed connection.</span></li>
+            <li><b>Cert rotation needs a forced recreate</b><span>Nginx reads the mounted cert files once at container start. After replacing <code>nginx/certs/origin.{crt,key}</code>: <code>docker compose up -d --force-recreate proxy</code> — a plain restart of the stack won't necessarily pick up new files depending on how they were replaced.</span></li>
+            <li><b>The dashboard's Docker socket mount is real host access</b><span><code>/var/run/docker.sock</code> is mounted into the dashboard container so it can tail other containers' logs — but that socket is effectively root-equivalent control over the whole Docker host. Treat dashboard credentials with the same seriousness as host SSH access, not just "an admin panel password."</span></li>
+            <li><b>Redis has no host port on purpose</b><span>The compose file's own comment explains why: an earlier config published 6379 to the internet and an unauthenticated <code>REPLICAOF</code> hijack wiped the dataset repeatedly. Don't add a <code>ports:</code> mapping back onto the <code>redis</code> service.</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Session storage — what's actually in <code>/sessions</code></h3>
+      <p><b style="color:var(--ink)">In short:</b> a "session" is WhatsApp's saved login for one phone number — the cryptographic keys that let the socket reconnect silently instead of asking for a fresh QR scan every time. It lives as plain files on disk, one folder per <code>clientId</code>, mounted in from outside the container so it survives restarts and rebuilds.</p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h4>How it's created and read</h4>
+          <p>Baileys' own <code>useMultiFileAuthState(sessionPath)</code> — called in <code>initClient()</code> against <code>/sessions/&lt;clientId&gt;</code> — creates the folder on first connect if it doesn't exist, and hands back a <code>state</code> object plus a <code>saveCreds()</code> callback that <code>socketManager.js</code> wires to Baileys' <code>creds.update</code> event so every credential rotation is persisted immediately, not just on clean shutdown.</p>
+        </div>
+        <div class="card">
+          <h4>What's actually in the folder</h4>
+          <p>Not one file — many small ones, one JSON file per stored key: <code>creds.json</code> (the account identity), plus a growing set of <code>pre-key-*.json</code>, <code>session-*.json</code>, <code>sender-key-*.json</code>, <code>app-state-sync-key-*.json</code> and <code>app-state-sync-version-*.json</code> files as the Signal protocol negotiates keys with each chat. Every read/write is guarded by an in-process file lock, so concurrent credential updates can't corrupt a file mid-write.</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-body">
+          <ul class="spec" style="display:grid; gap:0;">
+            <li><b><code>creds.json</code> is the crown jewel</b><span>It holds the account's identity and signing keys. Lose only this file and the effect is identical to a full logout — a fresh QR scan is required. The other files are protocol bookkeeping that Baileys rebuilds automatically as conversations resume.</span></li>
+            <li><b>These files ARE the login — treat them like credentials</b><span>Anyone with read access to <code>/sessions/&lt;clientId&gt;</code> can impersonate that WhatsApp number without ever seeing a QR code. There's no password layered on top of the filesystem permissions. Back it up encrypted if at all, and never commit it, log it, or ship it in a support bundle.</span></li>
+            <li><b>Deleted wholesale, never partially</b><span><code>worker/sessionUtils.js: clearSession()</code> does a recursive delete of the whole <code>/sessions/&lt;clientId&gt;</code> folder. It runs automatically on <code>LOGGED_OUT</code> (a fresh QR is coming anyway) and on any restart/stop/delete called with <code>resetSession: true</code>. Ordinary disconnects and reconnect backoff never touch these files — that's <em>why</em> a transient network blip doesn't force a rescan.</span></li>
+            <li><b>The bind mount is the only thing making sessions durable</b><span>Compose mounts <code>./sessions:/sessions</code> on the worker (see §Docker above) specifically so this folder outlives container rebuilds. If that mount is ever missing or points somewhere new, every client looks freshly logged-out on next start — the code has no fallback location.</span></li>
+            <li><b>A real path inconsistency to know about</b><span><code>worker/startupRehydrate.js</code> honors <code>WA_SESSIONS_DIR</code> (default <code>/sessions</code>) when scanning which clients to rehydrate on boot — but <code>socketManager.js</code>'s <code>initClient()</code> and <code>sessionUtils.js</code>'s <code>clearSession()</code> both hardcode the literal string <code>/sessions/&lt;clientId&gt;</code>. Setting <code>WA_SESSIONS_DIR</code> to anything else without also moving the bind mount will make startup rehydration scan the wrong folder while live reads/writes keep hitting <code>/sessions</code>.</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Environment variables</h3>
+      <div class="grid-2">
+        <div class="card">
+          <h4>worker</h4>
+          <ul class="spec">
+            <li><b>REDIS_PASSWORD</b><span>required, no default</span></li>
+            <li><b>WA_DEVICE_NAME</b><span>default "Admissions - CRM"</span></li>
+            <li><b>WA_DEVICE_PLATFORM</b><span>default "Linux"</span></li>
+            <li><b>WA_DEVICE_VERSION</b><span>default "120.0.0"</span></li>
+            <li><b>LOG_LEVEL</b><span>default info; compose sets warn</span></li>
+            <li><b>CLIENT_LOG_LEVEL</b><span>default = LOG_LEVEL; compose sets info</span></li>
+            <li><b>LOG_CLIENTS_DIR</b><span>unset = no per-client file log; compose sets /logs/clients</span></li>
+            <li><b>SCRUB_SIGNAL_LOGS</b><span>compose sets "true" — strips Signal ratchet/session data from stdout</span></li>
+            <li><b>WA_SESSIONS_DIR</b><span>default /sessions</span></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>api</h4>
+          <ul class="spec">
+            <li><b>REDIS_PASSWORD</b><span>required, no default</span></li>
+            <li><b>LOG_LEVEL / API_LOG_LEVEL</b><span>API_LOG_LEVEL falls back to LOG_LEVEL, default info; compose sets both warn</span></li>
+            <li><b>WA_EVENTS_CONSUMER_NAME</b><span>default "api-main"</span></li>
+            <li><b>WA_EVENTS_DLQ_STREAM</b><span>default "wa:events:dlq"</span></li>
+            <li><b>WA_EVENTS_POISON_THRESHOLD</b><span>default 5</span></li>
+            <li><b>WA_EVENTS_AUTOCLAIM_MIN_IDLE_MS</b><span>default 10000 (README says 60000 — code wins)</span></li>
+            <li><b>WA_EVENTS_AUTOCLAIM_INTERVAL_MS</b><span>default 15000</span></li>
+            <li><b>WA_EVENTS_AUTOCLAIM_BATCH_SIZE</b><span>default 50</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="gaps">
+      <div class="eyebrow">10 · Known gaps</div>
+      <h2>Current realities, not future tickets</h2>
+      <p class="lede">Pulled directly from <code>AGENTS.md</code> §19 and cross-checked against the code. These are operational facts to design around, not bugs waiting for a PR.</p>
+
+      <div class="panel">
+        <div class="panel-body">
+          <div class="gap-item"><span class="gap-sev high">HIGH</span><div><b>API and WebSocket endpoints are unauthenticated.</b><p class="muted" style="font-size:13px;">Anything that can reach <code>api:3000</code> — directly, or through the nginx proxy — can create, message, or delete any client. The dashboard's Basic Auth only gates the dashboard's own Express server, not the API itself.</p></div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>CORS is fully permissive</b> (<code>origin: true</code> in <code>api/index.js</code>).</div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>Redis host is hardcoded to <code>"redis"</code></b> in most modules; only <code>api/streamConsumer.js</code> respects <code>REDIS_HOST</code>. Inconsistent if the topology ever changes.</div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>No outbound retry counter or DLQ.</b> A send that keeps throwing retries forever, 3s apart, with no ceiling and no place to route it out of the loop.</div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>Poison-message counters are in-memory only</b> in the stream consumer — an API restart resets every message's strike count to zero.</div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>Bare phone numbers default to India (+91).</b> Both <code>worker/phone.js</code> and <code>api/phone.js</code> — byte-for-byte identical files — fall back to region <code>IN</code> when a number can't be parsed as international.</div></div>
+          <div class="gap-item"><span class="gap-sev med">MED</span><div><b>Dashboard default credentials are baked into code</b> (<code>admin</code> / <code>admin</code>). Compose overrides the password to <code>change-me</code> but leaves the username default.</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="cookbook">
+      <div class="eyebrow">11 · Cookbook</div>
+      <h2>Common operations</h2>
+      <p class="lede">Copy, adjust the host/clientId, run. Assumes the self-signed origin cert, hence <code>-k</code>.</p>
+
+      <div class="grid-2">
+        <div>
+          <h3 style="margin-top:0;">Create a client</h3>
+          <div class="cmd"><pre class="block">curl -k -X POST https://localhost/clients/client-1</pre><button class="copy-btn">copy</button></div>
+          <h3>Check status</h3>
+          <div class="cmd"><pre class="block">curl -k https://localhost/clients/client-1/status</pre><button class="copy-btn">copy</button></div>
+          <h3>Queue a text message</h3>
+          <div class="cmd"><pre class="block">curl -k -X POST https://localhost/messages/send \
+  -H "content-type: application/json" \
+  -d '{"clientId":"client-1","phoneNumber":"9999999999","text":"hello"}'</pre><button class="copy-btn">copy</button></div>
+          <h3>View pending queue</h3>
+          <div class="cmd"><pre class="block">curl -k "https://localhost/clients/client-1/queue?limit=20"</pre><button class="copy-btn">copy</button></div>
+        </div>
+        <div>
+          <h3 style="margin-top:0;">Clear a stuck queue</h3>
+          <div class="cmd"><pre class="block">curl -k -X DELETE "https://localhost/clients/client-1/queue"</pre><button class="copy-btn">copy</button></div>
+          <h3>Recent message log</h3>
+          <div class="cmd"><pre class="block">curl -k "https://localhost/clients/client-1/messages/log?limit=100"</pre><button class="copy-btn">copy</button></div>
+          <h3>Force a fresh QR (logged out / stuck)</h3>
+          <div class="cmd"><pre class="block">curl -k -X POST https://localhost/clients/client-1/restart \
+  -H "content-type: application/json" \
+  -d '{"resetSession": true}'</pre><button class="copy-btn">copy</button></div>
+          <h3>Run the test suites</h3>
+          <div class="cmd"><pre class="block">cd api && npm test
+cd worker && npm test</pre><button class="copy-btn">copy</button></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:26px;">
+        <div class="panel-title"><span>rules for future changes</span></div>
+        <div class="panel-body">
+          <ul class="spec">
+            <li><b>Never</b><span>dequeue while a client is disconnected/uninitialized</span></li>
+            <li><b>Never</b><span>remove requeue-on-send-failure without an explicit decision</span></li>
+            <li><b>Never</b><span>silently change reconnect semantics for 401 / 405 / 408 / 428 / the backoff plateau</span></li>
+            <li><b>Never</b><span>skip <code>logMessage</code> on a dequeued job's success or failure path</span></li>
+            <li><b>Never</b><span>delete <code>wa:msglog:&lt;clientId&gt;</code> from <code>deleteClient</code> — it expires on its own TTL</span></li>
+            <li><b>Always</b><span>update <code>README.md</code> + <code>AGENTS.md</code> in the same change when queue/state/event behavior moves</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Generated from the current state of <code>Baileys/</code> — worker/socketManager.js, api/streamConsumer.js, api/routes/*, dashboard/src/App.jsx, docker-compose.yaml, README.md, AGENTS.md. Cross-checked against code where docs and code disagreed.
+    </footer>
+  </main>
+</div>
+</div>
+
+<script>
+(function(){
+  // theme toggle
+  var root = document.documentElement;
+  var buttons = document.querySelectorAll('[data-set-theme]');
+  buttons.forEach(function(b){
+    b.addEventListener('click', function(){
+      var t = b.getAttribute('data-set-theme');
+      if(t){ root.setAttribute('data-theme', t); } else { root.removeAttribute('data-theme'); }
+      buttons.forEach(function(x){ x.classList.remove('active'); });
+      b.classList.add('active');
+    });
+  });
+
+  // toc active highlight
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main .section, .hero'));
+  var links = document.querySelectorAll('.toc a');
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting){
+        var id = e.target.id;
+        links.forEach(function(l){
+          l.classList.toggle('active', l.getAttribute('href') === '#'+id);
+        });
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(function(s){ io.observe(s); });
+
+  // ---- schematic animated flows ----
+  var flowDefs = {
+    lifecycle: {
+      color: 'var(--line)',
+      edges: ['e-dash-api','e-api-redis','e-redis-worker','e-worker-redis','e-redis-api','e-api-browser'],
+      caption: '<b>api</b> writes an ADD_CLIENT/RESTART/STOP/DELETE command → Redis list <code>wa:commands</code> → <b>worker</b> BRPOPs it, mutates the socket, writes <code>wa:clients:state</code> and XADDs an event → api\'s stream consumer XACKs and broadcasts to subscribed browsers over <code>/ws</code>.'
+    },
+    message: {
+      color: 'var(--green)',
+      edges: ['e-dash-api','e-api-redis','e-redis-worker','e-worker-wa'],
+      caption: '<b>api</b> validates <code>POST /messages/send</code> and LPUSHes onto <code>wa:pending:&lt;clientId&gt;</code> → <b>worker</b>\'s per-client sender loop BRPOPs it only while connected → exactly one message reaches <b>WhatsApp</b> at a time.'
+    },
+    event: {
+      color: 'var(--violet)',
+      edges: ['e-worker-redis','e-redis-api','e-api-browser'],
+      caption: '<b>worker</b> XADDs QR/status events to <code>wa:events:stream</code> → api\'s consumer group validates + XACKs → valid events broadcast through <code>wsHub</code> straight to the subscribed <b>browser</b>.'
+    }
+  };
+  var svg = document.getElementById('schematic');
+  var flowBtns = document.querySelectorAll('.flow-btn');
+  var flowCaption = document.getElementById('flow-caption');
+  var flowStatus = document.getElementById('flow-status');
+  var activeFlow = null;
+  var pulseEls = [];
+
+  function clearPulses(){
+    pulseEls.forEach(function(p){ p.remove(); });
+    pulseEls = [];
+    svg.querySelectorAll('.edge').forEach(function(e){ e.style.stroke = 'var(--line-dim)'; e.style.strokeWidth = '1.4'; });
+  }
+
+  function runFlow(name){
+    clearPulses();
+    if(activeFlow === name){ activeFlow = null; flowBtns.forEach(function(b){b.classList.remove('active');}); flowCaption.innerHTML = 'Pick a flow above — pulses trace the exact path that code takes.'; flowStatus.textContent = 'idle'; return; }
+    activeFlow = name;
+    flowBtns.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-flow') === name); });
+    var def = flowDefs[name];
+    flowCaption.innerHTML = def.caption;
+    flowStatus.textContent = name + ' →';
+    def.edges.forEach(function(edgeId, i){
+      var path = document.getElementById(edgeId);
+      if(!path) return;
+      path.style.stroke = def.color;
+      path.style.strokeWidth = '2';
+      var dot = document.createElementNS('http://www.w3.org/2000/svg','circle');
+      dot.setAttribute('r','3.4');
+      dot.setAttribute('fill', def.color);
+      dot.classList.add('pulse-dot');
+      svg.appendChild(dot);
+      pulseEls.push(dot);
+      var len = path.getTotalLength();
+      var start = performance.now() + i*220;
+      function tick(now){
+        if(activeFlow !== name) return;
+        var t = ((now - start) % 1400) / 1400;
+        if(now < start){ dot.style.opacity = 0; requestAnimationFrame(tick); return; }
+        dot.style.opacity = 1;
+        var pt = path.getPointAtLength(t * len);
+        dot.setAttribute('cx', pt.x); dot.setAttribute('cy', pt.y);
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    });
+  }
+  flowBtns.forEach(function(b){ b.addEventListener('click', function(){ runFlow(b.getAttribute('data-flow')); }); });
+  runFlow('lifecycle');
+
+  // ---- lifecycle diagram ----
+  var lcNodes = [
+    { id:'CREATED', x:20, y:30, w:120, h:50, color:'var(--faint)' },
+    { id:'CONNECTING', x:220, y:30, w:130, h:50, color:'var(--amber)' },
+    { id:'QR_REQUIRED', x:220, y:170, w:130, h:50, color:'var(--amber)' },
+    { id:'CONNECTED', x:470, y:30, w:130, h:50, color:'var(--green)' },
+    { id:'DISCONNECTED', x:470, y:170, w:130, h:50, color:'var(--red)' },
+    { id:'LOGGED_OUT', x:220, y:310, w:130, h:50, color:'var(--red)' },
+    { id:'STOPPED', x:620, y:310, w:120, h:50, color:'var(--muted)' },
+    { id:'DELETED', x:470, y:310, w:120, h:50, color:'var(--faint)', dashed:true }
+  ];
+  var lcEdges = [
+    { from:'CREATED', to:'CONNECTING', label:'ADD_CLIENT' },
+    { from:'CONNECTING', to:'QR_REQUIRED', label:'qr emitted' },
+    { from:'QR_REQUIRED', to:'CONNECTED', label:'connection:open' },
+    { from:'CONNECTING', to:'CONNECTED', label:'session resumed' },
+    { from:'CONNECTED', to:'DISCONNECTED', label:'close (other)' },
+    { from:'DISCONNECTED', to:'CONNECTING', label:'backoff retry' },
+    { from:'CONNECTED', to:'LOGGED_OUT', label:'401 / loggedOut' },
+    { from:'LOGGED_OUT', to:'CONNECTING', label:'auto reinit 1.5s' },
+    { from:'CONNECTED', to:'CONNECTING', label:'515 handover' },
+    { from:'STOPPED', to:'CONNECTING', label:'reconnect / restart' },
+  ];
+  var lcDetails = {
+    CREATED: {
+      kind: 'persisted state · written by api',
+      entry: '<code>POST /clients/:clientId</code> writes <code>CREATED</code> into <code>wa:clients:state</code> before anything touches a socket.',
+      redis: 'HSET wa:clients:state &lt;id&gt; CREATED',
+      exit: 'Enqueueing <code>ADD_CLIENT</code> triggers the worker\'s <code>initClient()</code>, which immediately moves state to CONNECTING.'
+    },
+    CONNECTING: {
+      kind: 'persisted state · worker-owned',
+      entry: 'Entered at the very start of <code>initClient()</code>, and again on every reconnect attempt, restart, and the 515 post-login handover.',
+      redis: 'HSET wa:clients:state &lt;id&gt; CONNECTING · publishes a CONNECTING status event on restart/515 paths',
+      exit: 'Baileys emits a <code>qr</code> event (session doesn\'t exist / needs pairing) or <code>connection:open</code> directly (resumed from valid session files).'
+    },
+    QR_REQUIRED: {
+      kind: 'persisted state · worker-owned',
+      entry: 'Baileys\' <code>connection.update</code> callback fires with a <code>qr</code> payload.',
+      redis: 'SET wa:qr:&lt;id&gt; &lt;qr&gt; EX 120 · XADD {type:"qr", clientId, qr} (retried once on publish failure)',
+      exit: 'User scans → Baileys reports <code>connection === "open"</code> → CONNECTED. If no scan within the QR/session lifetime, the socket eventually closes and re-enters CONNECTING → a new QR is issued.'
+    },
+    CONNECTED: {
+      kind: 'persisted state · worker-owned',
+      entry: '<code>connection === "open"</code>: reconnect counters cleared, sender loop restarted after a 2s delay.',
+      redis: 'HSET → CONNECTED · DEL wa:qr:&lt;id&gt; · XADD {type:"status", state:"CONNECTED"} · SADD wa:clients:active',
+      exit: 'Any <code>connection === "close"</code> routes to DISCONNECTED, LOGGED_OUT, or the 515-handover path back through CONNECTING, depending on the status code.'
+    },
+    DISCONNECTED: {
+      kind: 'persisted state · worker-owned',
+      entry: 'Any close that is not a logout (401) and not the post-login 515 handover.',
+      redis: 'HSET → DISCONNECTED · XADD {type:"status", state:"DISCONNECTED"} · SREM wa:clients:active',
+      exit: 'Scheduled reconnect calls <code>initClient()</code> again, <b>preserving the session</b>. Delay = min(15000×attempt,120000)ms for codes 405/408/428, else min(3000×attempt,30000)ms. No hard retry cap — see the note below the diagram.'
+    },
+    LOGGED_OUT: {
+      kind: 'persisted state · worker-owned',
+      entry: 'Baileys close with statusCode 401 or <code>DisconnectReason.loggedOut</code>.',
+      redis: 'HSET → LOGGED_OUT · XADD {type:"status", state:"LOGGED_OUT"} · session directory deleted via clearSession()',
+      exit: 'Auto-reinitializes after 1.5s via <code>scheduleReconnect</code> → <code>initClient()</code> → fresh QR issued, since the session is gone.'
+    },
+    STOPPED: {
+      kind: 'persisted state · command-driven, terminal by design',
+      entry: '<code>STOP_CLIENT</code> command (from <code>POST /clients/:id/stop</code>). Sender loop stopped, socket torn down, session optionally wiped if <code>resetSession</code>.',
+      redis: 'HSET → STOPPED · XADD {type:"status", state:"STOPPED"} · SREM wa:clients:active',
+      exit: 'No auto-reconnect. Only <code>POST /clients/:id/reconnect</code> (ADD_CLIENT) or <code>/restart</code> (RESTART_CLIENT) moves it forward again.'
+    },
+    DELETED: {
+      kind: 'event only · never a hash value',
+      entry: '<code>DELETE_CLIENT</code> command. This is not a value ever stored in <code>wa:clients:state</code> — the field is removed entirely.',
+      redis: 'HDEL wa:clients:state &lt;id&gt; · DEL wa:qr:&lt;id&gt; · DEL wa:pending:&lt;id&gt; · session directory wiped · XADD {type:"status", state:"DELETED"}',
+      exit: 'Terminal. <code>wa:msglog:&lt;id&gt;</code> is deliberately left alone — it only disappears via its own 7-day TTL trim.'
+    }
+  };
+
+  var lcNodeMap = {};
+  lcNodes.forEach(function(n){ lcNodeMap[n.id] = n; });
+
+  function nodeCenter(n){ return { x:n.x+n.w/2, y:n.y+n.h/2 }; }
+  function edgeAnchor(from, to){
+    var a = lcNodeMap[from], b = lcNodeMap[to];
+    var ac = nodeCenter(a), bc = nodeCenter(b);
+    function clamp(node, tx, ty){
+      var cx = node.x+node.w/2, cy = node.y+node.h/2;
+      var dx = tx-cx, dy = ty-cy;
+      var sx = node.w/2/Math.max(Math.abs(dx),0.001);
+      var sy = node.h/2/Math.max(Math.abs(dy),0.001);
+      var s = Math.min(sx,sy,1);
+      return { x:cx+dx*s, y:cy+dy*s };
+    }
+    return { p1: clamp(a,bc.x,bc.y), p2: clamp(b,ac.x,ac.y) };
+  }
+
+  var edgesG = document.getElementById('lc-edges');
+  var nodesG = document.getElementById('lc-nodes');
+  var edgePaths = {};
+
+  lcEdges.forEach(function(e, idx){
+    var anchor = edgeAnchor(e.from, e.to);
+    var midx = (anchor.p1.x+anchor.p2.x)/2, midy = (anchor.p1.y+anchor.p2.y)/2;
+    var curve = (e.from === e.to) ? 40 : (idx%2===0 ? 24 : -24);
+    var path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    var d = 'M'+anchor.p1.x+','+anchor.p1.y+' Q'+(midx)+','+(midy+curve)+' '+anchor.p2.x+','+anchor.p2.y;
+    path.setAttribute('d', d);
+    path.setAttribute('class','lc-edge');
+    path.setAttribute('marker-end','url(#arrow2)');
+    path.dataset.from = e.from; path.dataset.to = e.to;
+    edgesG.appendChild(path);
+    edgePaths[e.from+'>'+e.to] = path;
+
+    var label = document.createElementNS('http://www.w3.org/2000/svg','text');
+    label.setAttribute('x', midx); label.setAttribute('y', midy+curve*0.6);
+    label.setAttribute('class','lc-edge-label'); label.setAttribute('text-anchor','middle');
+    label.textContent = e.label;
+    edgesG.appendChild(label);
+  });
+
+  lcNodes.forEach(function(n){
+    var g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    g.setAttribute('class','lc-node');
+    g.setAttribute('tabindex','0');
+    g.setAttribute('role','button');
+    g.setAttribute('aria-label', n.id + ' state');
+    g.id = 'lc-'+n.id;
+    var rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x', n.x); rect.setAttribute('y', n.y);
+    rect.setAttribute('width', n.w); rect.setAttribute('height', n.h);
+    if(n.dashed) rect.setAttribute('stroke-dasharray','4 3');
+    g.appendChild(rect);
+
+    var dot = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    dot.setAttribute('cx', n.x+14); dot.setAttribute('cy', n.y+14); dot.setAttribute('r', 4);
+    dot.setAttribute('fill', n.color);
+    g.appendChild(dot);
+
+    var text = document.createElementNS('http://www.w3.org/2000/svg','text');
+    text.setAttribute('x', n.x+n.w/2); text.setAttribute('y', n.y+n.h/2+4);
+    text.setAttribute('text-anchor','middle');
+    text.textContent = n.id;
+    g.appendChild(text);
+
+    function select(){
+      document.querySelectorAll('.lc-node').forEach(function(x){ x.classList.remove('selected'); });
+      g.classList.add('selected');
+      Object.values(edgePaths).forEach(function(p){ p.classList.remove('highlight'); });
+      Object.keys(edgePaths).forEach(function(k){
+        if(k.indexOf(n.id) === 0 || k.indexOf('>'+n.id) === k.length - (n.id.length+1)){
+          edgePaths[k].classList.add('highlight');
+        }
+      });
+      var d = lcDetails[n.id];
+      document.getElementById('lc-detail-body').innerHTML =
+        '<h4>'+n.id+'</h4><span class="kind">'+d.kind+'</span>'+
+        '<dl><dt>On entry</dt><dd>'+d.entry+'</dd>'+
+        '<dt>Redis / events</dt><dd>'+d.redis+'</dd>'+
+        '<dt>How it exits</dt><dd>'+d.exit+'</dd></dl>';
+    }
+    g.addEventListener('click', select);
+    g.addEventListener('keydown', function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); select(); } });
+    nodesG.appendChild(g);
+  });
+  document.getElementById('lc-CREATED').dispatchEvent(new Event('click'));
+
+  // ---- redis key filter ----
+  var searchInput = document.getElementById('key-search');
+  var rows = document.querySelectorAll('#key-table tbody tr');
+  searchInput.addEventListener('input', function(){
+    var q = searchInput.value.toLowerCase();
+    rows.forEach(function(r){
+      var hit = r.textContent.toLowerCase().indexOf(q) !== -1;
+      r.classList.toggle('row-hidden', !hit);
+    });
+  });
+
+  // ---- media decision tool ----
+  var mFiles = document.getElementById('m-files');
+  var mFilesVal = document.getElementById('m-files-val');
+  var mMime = document.getElementById('m-mime');
+  var mText = document.getElementById('m-text');
+  var mResult = document.getElementById('m-result');
+
+  function canCaption(mime){ return mime.indexOf('image/')===0 || mime.indexOf('video/')===0; }
+  function shapeFor(mime){
+    if(mime.indexOf('image/')===0) return 'image: { url }';
+    if(mime.indexOf('video/')===0) return 'video: { url }';
+    if(mime.indexOf('audio/')===0) return 'audio: { url }, mimetype';
+    return 'document: { url }, mimetype, fileName';
+  }
+
+  function renderMedia(){
+    var n = parseInt(mFiles.value, 10);
+    mFilesVal.textContent = n===0 ? '0 files (text only)' : n+' file'+(n>1?'s':'');
+    var mime = mMime.value;
+    var hasText = mText.checked;
+    var steps = [];
+    if(n === 0){
+      if(hasText) steps.push('sock.sendMessage(jid, { text })');
+      else steps.push('<span class="muted">nothing to send — enqueue would be rejected (400 "Nothing to send")</span>');
+    } else if(n === 1){
+      var cap = canCaption(mime) && hasText;
+      steps.push('sock.sendMessage(jid, { '+shapeFor(mime)+(cap?', caption':'')+' })');
+      if(hasText && !cap) steps.push('sock.sendMessage(jid, { text })  <span class="muted">— '+mime+" can't carry a caption</span>");
+    } else {
+      for(var i=0;i<n;i++){ steps.push('sock.sendMessage(jid, { '+shapeFor(mime)+' })  <span class="muted">file '+(i+1)+' — never captioned in multi-file mode</span>'); }
+      if(hasText) steps.push('sock.sendMessage(jid, { text })  <span class="muted">— sent last, once</span>');
+    }
+    mResult.innerHTML = steps.map(function(s){ return '<div class="step">'+s+'</div>'; }).join('');
+  }
+  [mFiles, mMime, mText].forEach(function(el){ el.addEventListener('input', renderMedia); });
+  renderMedia();
+
+  // ---- copy buttons ----
+  document.querySelectorAll('.copy-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var pre = btn.previousElementSibling;
+      var text = pre.textContent;
+      navigator.clipboard.writeText(text).then(function(){
+        btn.textContent = 'copied'; btn.classList.add('copied');
+        setTimeout(function(){ btn.textContent='copy'; btn.classList.remove('copied'); }, 1500);
+      });
+    });
+  });
+})();
+</script>
