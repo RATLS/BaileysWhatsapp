@@ -23,6 +23,7 @@ class FakeSocket extends EventEmitter {
 
 test("websocket route re-subscribes when a socket sends a different clientId", async (t) => {
   const registrations = []
+  const tagged = []
   const routePath = path.join(__dirname, "..", "routes", "ws.js")
   const route = loadWithMocks(routePath, {
     "../wsHub": {
@@ -37,6 +38,9 @@ test("websocket route re-subscribes when a socket sends a different clientId", a
       },
       async get() {
         return null
+      },
+      async llen() {
+        return 0
       }
     },
     "../logger": {
@@ -48,6 +52,11 @@ test("websocket route re-subscribes when a socket sends a different clientId", a
 
   let handler
   await route({
+    envTagger: {
+      async tagFromHeaders(clientId, headers) {
+        tagged.push({ clientId, headers })
+      }
+    },
     get(pathName, options, routeHandler) {
       assert.equal(pathName, "/ws")
       assert.deepEqual(options, { websocket: true })
@@ -56,7 +65,8 @@ test("websocket route re-subscribes when a socket sends a different clientId", a
   })
 
   const socket = new FakeSocket()
-  handler(socket, {})
+  const headers = { origin: "https://institute.reachandteach.in" }
+  handler(socket, { headers })
 
   await socket.receive({ type: "ping", clientId: "client-a" })
   await socket.receive({ type: "ping", clientId: "client-b" })
@@ -65,7 +75,12 @@ test("websocket route re-subscribes when a socket sends a different clientId", a
   assert.equal(registrations[0].socket, socket)
   assert.equal(registrations[1].socket, socket)
   assert.deepEqual(socket.sent.filter((message) => message.type === "status"), [
-    { type: "status", clientId: "client-a", state: "CONNECTED" },
-    { type: "status", clientId: "client-b", state: "QR_REQUIRED" }
+    { type: "status", clientId: "client-a", state: "CONNECTED", queueCount: 0 },
+    { type: "status", clientId: "client-b", state: "QR_REQUIRED", queueCount: 0 }
+  ])
+  // Env tagging runs once per subscription, with the upgrade request headers.
+  assert.deepEqual(tagged, [
+    { clientId: "client-a", headers },
+    { clientId: "client-b", headers }
   ])
 })

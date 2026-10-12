@@ -141,12 +141,20 @@ Must remain true unless explicitly approved otherwise:
 - `POST /messages/send`
   - validates body, file structure, and non-empty content
 - Queue endpoints:
-  - `GET /clients/:clientId/queue`
+  - `GET /clients/:clientId/queue?limit=<1..200>&offset=<n>`
+    - read-only; `offset` optional (default/invalid → `0`); returns `{ clientId, total, returned, limit, offset, messages[] }`
+    - `messages[].index` is absolute from the head; send position = `total - index`
   - `DELETE /clients/:clientId/queue`
 - Message log endpoint:
   - `GET /clients/:clientId/messages/log?limit=<1..200>&before=<timestamp_ms>`
   - returns `{ clientId, total, returned, limit, messages[] }` newest-first
   - malformed entries returned as `{ raw, parseError: true }` — never throws
+- Environment labels (`api/envTagger.js`, `api/routes/clientEnv.js`):
+  - detected only from `X-Source` (`CRM<Env>-…` Lambda name) or `Origin` via `ENV_ORIGINS`; never from the `clientId`
+  - label set once (`HSETNX`), never auto-overwritten; conflicts go to `wa:clients:envMismatch`
+  - tagging must never block, fail, or alter a request (errors are warned and swallowed)
+  - `GET /debug/client-envs`, `PUT /clients/:clientId/env`, `DELETE /clients/:clientId/env`
+- `GET /debug/queue-counts` returns `{ counts, total }` for all clients in one call
 
 ---
 
@@ -156,11 +164,17 @@ Must remain true unless explicitly approved otherwise:
 - Client row is primary control area.
 - Queue panel supports:
   - per-row queue view/clear
-  - manual queue lookup by arbitrary `clientId` (including non-initialized clients)
-- Message log panel (separate tab from queue):
-  - "View Logs" on client row loads the most recent 100 entries
-  - manual lookup by arbitrary `clientId` supported
+  - shows the whole queue (paged loading) in send order, `#1` = sent next
+- Message log panel (separate window from queue):
+  - "Logs" on client row loads the most recent 100 entries, "Load more" pages older ones
   - status badge distinguishes `sent` vs `failed` visually
+- The arbitrary-`clientId` lookup box was removed on request (2026-10-12); queue/logs/history open from client rows only.
+  The API endpoints still accept any `clientId`.
+- Every mutating action reports success or the API error text (toast); no silent failures.
+- Session-wiping actions (Reset + Restart / Reset + Stop) and Delete require confirmation.
+- Row actions are state-aware (Reconnect only for `DISCONNECTED`/`LOGGED_OUT`/`STOPPED`, Stop hidden for `STOPPED`).
+- Dashboard tunables live in `dashboard/src/config.js` (`VITE_*` overrides); don't hardcode them in components.
+- Newer endpoints must degrade gracefully on older APIs (404 → feature off, no repeated errors).
 
 ---
 
@@ -175,6 +189,8 @@ Must remain true unless explicitly approved otherwise:
 - `wa:events:dlq`
 - `wa:config:sendDelay`
 - `wa:msglog:<clientId>` — Redis sorted set; score = Unix ms timestamp; member = JSON `{ phoneNumber, sentAt, status, text, fileCount, failReason? }`; entries older than 7 days are trimmed inline on each write; NOT deleted on client delete
+- `wa:clients:env` — Redis hash `clientId -> dev|test|uat|prod`; set once by the API; deleted on client delete
+- `wa:clients:envMismatch` — Redis hash `clientId -> comma-separated other envs`; warning only; deleted on client delete or manual env set
 
 ---
 
@@ -186,9 +202,10 @@ Must remain true unless explicitly approved otherwise:
 4. `api/streamConsumer.js`
 5. `api/routes/clients.js`
 6. `api/routes/messages.js`
-7. `dashboard/src/App.jsx`
-8. `api/tests/*.test.js` (includes `messageLogs.routes.test.js`)
-9. `worker/tests/*.test.js`
+7. `dashboard/src/App.jsx`, `dashboard/src/config.js`, `dashboard/src/components/`
+8. `api/envTagger.js`
+9. `api/tests/*.test.js` (includes `messageLogs.routes.test.js`, `envTagger.test.js`)
+10. `worker/tests/*.test.js`
 
 ---
 
@@ -214,6 +231,8 @@ When changing queue/state/event behavior:
   - message log write on successful send and on failure (including `failReason`)
   - message log errors do not block delivery or requeue
   - message log API: pagination, limit clamping, `before` cursor, field shapes, malformed-entry handling
+  - queue `offset` paging, `/debug/queue-counts`
+  - environment labels: detection, label-once, mismatch, ignored callers, error swallowing, manual routes, delete cleanup, websocket tagging
 - Prefer adding focused tests beside the changed surface before expanding broader integration coverage.
 
 ---

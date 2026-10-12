@@ -4,6 +4,8 @@ Redis-orchestrated WhatsApp backend built around Baileys, Fastify, and a small o
 
 This README is intended to be enough to understand the codebase before making changes. It documents the actual runtime model, data contracts, operational defaults, and the files that own each behavior.
 
+For a beginner-friendly visual walkthrough, open [`docs/system-architecture.html`](docs/system-architecture.html) in a browser. It introduces Redis, Baileys, and Docker in plain language, then lets you explore the services, message flows, client lifecycle, Redis keys, and API routes.
+
 ## 1) What This Repo Does
 
 The system manages multiple WhatsApp clients identified by `clientId`.
@@ -121,6 +123,8 @@ Primary files:
 - `api/routes/messages.js`
 - `api/routes/ws.js`
 - `api/routes/debug-routes.js`
+- `api/routes/clientEnv.js`
+- `api/envTagger.js`
 - `api/streamConsumer.js`
 - `api/wsHub.js`
 
@@ -131,6 +135,7 @@ Responsibilities:
 - read QR/state snapshots from Redis for newly registered sockets
 - consume worker events from `wa:events:stream`
 - broadcast valid events to interested WebSocket clients
+- label each client with the environment (dev/test/uat/prod) that uses it (see 13.7)
 
 Important implementation details:
 
@@ -143,7 +148,10 @@ Important implementation details:
 Primary files:
 
 - `dashboard/server/index.js`
-- `dashboard/src/App.jsx`
+- `dashboard/src/App.jsx` (coordinator: refresh loop, actions, filters)
+- `dashboard/src/config.js` (all tunables; `VITE_*` overrides)
+- `dashboard/src/api.js` (API client that surfaces server error text)
+- `dashboard/src/components/*.jsx`
 
 Responsibilities:
 
@@ -207,6 +215,15 @@ These keys are the runtime contracts the rest of the code assumes:
   `status` is `"sent"` or `"failed"`. `failReason` is present only on failures.
   Entries older than 7 days are trimmed inline on each write.
   This key is intentionally NOT deleted when a client is deleted — it expires naturally via TTL trimming.
+
+- `wa:clients:env`
+  Redis hash of `clientId -> dev | test | uat | prod`.
+  Set once (`HSETNX`) on the first labelled request for a client; never overwritten automatically.
+  Changed only from the dashboard (`PUT/DELETE /clients/:clientId/env`). Removed on client delete.
+
+- `wa:clients:envMismatch`
+  Redis hash of `clientId -> comma-separated envs` that used the client after it was labelled differently.
+  Warning only; cleared when the env is set manually or the client is deleted.
 
 ## 6) Client States
 
@@ -606,6 +623,7 @@ Broadcast model:
 
 - `DELETE /clients/:clientId`
   - queues `DELETE_CLIENT`
+  - removes the client's env label (`wa:clients:env`, `wa:clients:envMismatch`)
 
 - `GET /clients/:clientId/status`
   - returns `{ state: "<STATE>" }` if known
@@ -628,17 +646,23 @@ Broadcast model:
 - `POST /messages/send`
   - validates and enqueues outbound jobs
 
-- `GET /clients/:clientId/queue?limit=<1..200>`
+- `GET /clients/:clientId/queue?limit=<1..200>&offset=<n>`
+  - `offset` (optional, default `0`, invalid/negative treated as `0`) pages from the head of the list
+  - read-only (`LLEN` + `LRANGE`); never removes or reorders jobs
   - returns:
     - `clientId`
     - `total`
     - `returned`
     - `limit`
+    - `offset`
     - `messages`
   - each `messages[]` row includes:
-    - `index`
+    - `index` (absolute position from the head, i.e. includes `offset`)
     - `raw`
     - `parsed` or `null`
+  - send order: jobs are `LPUSH`ed and the worker `BRPOP`s the tail, so index `0` is the newest job and
+    a job's send position is `total - index` (`1` = sent next). The dashboard pages through the whole
+    queue and shows it in send order.
 
 - `DELETE /clients/:clientId/queue`
   - deletes the Redis list for that client
@@ -675,46 +699,115 @@ Broadcast model:
 - `POST /debug/test-broadcast/:clientId`
 - `GET /debug/qr/:clientId`
 - `GET /debug/pending/:clientId`
+- `GET /debug/queue-counts`
+  - `{ counts: { clientId: queueLength }, total, timestamp }` for every client in `wa:clients:state`
+  - one call for all row badges instead of one request per client
+- `GET /debug/client-envs`
+  - `{ envs: { clientId: env }, mismatches: { clientId: [env...] }, timestamp }`
 
 These endpoints are operational/debug tooling, not hardened admin APIs.
 
+### 13.7 Client environment labels
+
+Every client gets the environment (`dev`, `test`, `uat`, `prod`) of whoever uses it. Nothing about
+sending changes; the label is recorded only.
+
+How the environment is detected (first match wins, otherwise the request is ignored):
+
+1. `X-Source` header with a backend Lambda name: `CRMDev-…`, `CRMTest-…`, `CRMUat-…`, `CRMProd-…`
+   (the CRM backend sends `os.environ["AWS_LAMBDA_FUNCTION_NAME"]`)
+2. `Origin` header matched against `ENV_ORIGINS` (browser calls from the CRM frontend / desktop app)
+
+`ENV_ORIGINS` is set on the `api` service, format `origin=env,origin=env`, e.g.
+`https://institute.reachandteach.in=prod,https://development.reachandteach.in=dev`.
+The dashboard and `localhost` are not in the list, so they never label clients.
+
+When a client is labelled:
+
+- only on successful (`< 400`) requests to: `POST /messages/send`, `POST /clients/:clientId`,
+  `POST /clients/:clientId/{reconnect,restart,stop}`, `GET|DELETE /clients/:clientId/queue`,
+  `GET /clients/:clientId/status`, and on websocket subscribe
+- first label wins (`HSETNX`); after that the API keeps the label in memory and skips Redis entirely
+- a different env later using the same client is recorded in `wa:clients:envMismatch`, not overwritten
+- tagging errors are logged and swallowed; they never affect the request
+
+Manual control (dashboard):
+
+- `PUT /clients/:clientId/env` body `{ env }` — sets the label, clears mismatches
+- `DELETE /clients/:clientId/env` — removes the label; the next labelled request sets it again
+
+Note: the in-memory cache is per API process. If Redis is wiped while the API keeps running,
+already-seen clients are not re-labelled until the API restarts.
+
 ## 14) Dashboard Behavior
 
-The React dashboard in `dashboard/src/App.jsx` is a polling admin UI with queue tools and log access.
+The React dashboard (`dashboard/src/`) is a polling admin UI with queue tools and log access.
 
-It currently supports:
+Layout:
 
-- manual API base URL entry, stored in localStorage
-- client creation
-- reconnect, restart, reset+restart
-- stop, reset+stop
-- delete
-- queue inspection for known clients
-- manual queue lookup by arbitrary `clientId`
-- queue clear by row action or manual lookup
-- send-delay view/edit
-- simple text-message enqueue form
-- overview counters:
-  - known clients
-  - active sockets
-  - websocket connections
-- log tailing for `worker`, `api`, `redis`, `dashboard`
-- per-client message log viewer:
-  - "View Logs" button on each client row loads the most recent 100 entries
-  - displayed in a "Message Logs" tab alongside the "Client Queue" tab
-  - each entry shows: status badge (sent/failed), phone number, file count, timestamp, message text, and fail reason (failed entries only)
-  - manual lookup by arbitrary `clientId` supported via the log tab input
+- top bar: API endpoint + last refresh time, Refresh, Settings
+- red banner when the API is unreachable (shows since when and how old the data is)
+- tabs: **Clients** and **Service Logs**
+
+Clients tab:
+
+- state counters (one per client state) plus total queued and live sockets; clicking a counter filters the list
+- environment filter chips (All / Dev / Test / UAT / Prod / Unknown); combine with search and state filter
+- create client
+- client rows (the primary control area):
+  - env badge (dropdown to override), mismatch warning, state, live, websocket count
+  - queue badge (`N queued`), amber at `VITE_QUEUE_WARN_AT` (default 20), red at `VITE_QUEUE_ALERT_AT` (default 100)
+  - copy client ID
+  - Queue / Logs / History
+  - only actions valid for the state: Reconnect (Disconnected, Logged Out, Stopped), Restart (always), Stop (not Stopped)
+  - `⋯` menu: Reset session + Restart, Reset session + Stop (both confirm first), Delete
+- every action reports success or the API's error text as a toast
+
+Windows:
+
+- Queue: loads the whole queue 200 at a time with progress, shown in send order (`#1` = sent next); Stop / Refresh / Clear;
+  Export JSON/CSV of the loaded messages (JSON records whether the export is complete)
+- Message Logs: newest 100, All / Sent / Failed filter, failed count, "Load more" via the `before` cursor;
+  Export JSON/CSV fetches all remaining pages first and applies the current status filter
+- Queue, Message Logs and History each have a search box (phone digits or message text); exports apply
+  the current search/status filters. Phones are displayed as `+91 98765 43210`.
+- CSV exports are UTF-8 with BOM (opens correctly in Excel) and escape cells starting with `= + - @`
+  so message text can't run as a spreadsheet formula
+- History: date range plus Today / 7 days / 30 days presets, Export JSON, Delete File
+- Settings: API endpoint (validated, stored in localStorage), send delay (min ≤ max and range checked)
+
+Service Logs tab:
+
+- container logs from the dashboard server (`/api/logs`), service list from `/api/logs/services`
+  (`DASH_LOG_SERVICES`, default `worker,api,redis,dashboard`), line count, text filter (e.g. a client ID), auto-refresh
+- in `npm run dev`, vite proxies `/api` to `DASHBOARD_SERVER_URL` (default `http://localhost:8080`), so the
+  dashboard container (or `npm start`) must be running
+
+Compatibility with older APIs:
+
+- if `/debug/queue-counts` or `/debug/client-envs` return `404`, that feature is switched off for the
+  current endpoint (no badges / env controls disabled) instead of erroring on every refresh
+- if the queue endpoint ignores `offset`, the Queue window shows the first page and says so
+
+Configuration (`dashboard/src/config.js`, build-time `VITE_*` variables):
+
+- `VITE_API_BASE` (default `http://localhost:3000`), `VITE_DASHBOARD_SERVER_BASE` (default same origin)
+- `VITE_REFRESH_INTERVAL_MS` (default `5000`), `VITE_TOAST_DURATION_MS`, `VITE_SERVICE_LOG_REFRESH_MS`
+- `VITE_QUEUE_WARN_AT`, `VITE_QUEUE_ALERT_AT`
 
 Polling behavior:
 
-- refreshes debug data every 5 seconds
+- refreshes client states, active sockets, websocket stats, queue counts and env labels every
+  `VITE_REFRESH_INTERVAL_MS`; a refresh is skipped while the previous one is still running
+- polling (and Service Logs auto-refresh) pauses while the browser tab is hidden and refreshes
+  immediately when the tab is shown again
 
 Operational UX contract already assumed in the repo:
 
 - client row is the primary control area
 - no duplicate bottom action block
-- queue panel supports arbitrary `clientId` lookup, even for clients not created yet
-- message log panel supports arbitrary `clientId` lookup, even for clients not currently active
+- queue, logs and history open from the client row (the arbitrary-`clientId` lookup box was removed;
+  for a client that isn't listed, call the API directly, e.g. `GET /clients/<id>/queue`)
 
 ## 15) Docker Compose Defaults
 
@@ -757,11 +850,13 @@ Current compose environment highlights:
 - api:
   - `LOG_LEVEL`
   - `API_LOG_LEVEL`
+  - `ENV_ORIGINS` (frontend origin → environment map, see 13.7; overridable from `.env`)
 
 - dashboard:
   - `DASH_USER`
   - `DASH_PASS`
   - `DASH_PORT`
+  - `DASH_LOG_SERVICES` (optional; services shown in Service Logs, default `worker,api,redis,dashboard`)
 
 ## 16) TLS / Proxy Setup
 
@@ -790,6 +885,9 @@ Current automated tests live in:
 - `api/tests/clients.routes.test.js`
 - `api/tests/messages.routes.test.js`
 - `api/tests/messageLogs.routes.test.js`
+- `api/tests/debug.routes.test.js`
+- `api/tests/envTagger.test.js`
+- `api/tests/ws.routes.test.js`
 - `api/tests/streamConsumer.test.js`
 - `worker/tests/socketManager.test.js`
 - `worker/tests/startupRehydrate.test.js`
@@ -799,7 +897,11 @@ What is covered today:
 - send-delay defaults, normalization, and validation
 - client creation and duplicate handling
 - reconnect state gatekeeping
-- queue inspection and clearing endpoints
+- queue inspection and clearing endpoints, including `offset` paging and invalid/past-end offsets
+- queue counts for all clients in one call
+- environment labels: `X-Source` / `Origin` detection, label-once, in-memory skip, mismatch recording,
+  ignored dashboard/localhost/unknown callers, Redis errors swallowed, allowed-routes-only hook,
+  manual set/clear routes, label cleared on client delete, websocket subscribe tagging
 - message enqueue validation
 - stream message validation, ack, and DLQ handling
 - disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap session persistence, and sender-loop requeue behavior

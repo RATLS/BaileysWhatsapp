@@ -62,6 +62,8 @@ services:
       LOG_LEVEL: "warn"
       API_LOG_LEVEL: "warn"
       REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
+      # Frontend origin -> environment, used to label clients (wa:clients:env).
+      ENV_ORIGINS: "${ENV_ORIGINS:-https://development.reachandteach.in=dev,https://testing.reachandteach.in=test,https://master.reachandteach.in=uat,https://institute.reachandteach.in=prod}"
     volumes:
       - ./logs:/logs
     restart: unless-stopped
