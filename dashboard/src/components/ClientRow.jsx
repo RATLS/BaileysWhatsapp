@@ -19,15 +19,32 @@ export default function ClientRow({
   env,
   otherEnvs,
   envSupported,
+  alertWatched,
+  alertsSupported,
+  showQrButton,
   actions,
 }) {
   const meta = STATE_META[state] || { ...UNKNOWN_STATE_META, label: state || UNKNOWN_STATE_META.label }
+  const alertMenuItem = alertsSupported
+    ? [{
+        label: alertWatched ? "Stop alerts" : "Watch for alerts",
+        title: alertWatched
+          ? "Stop posting this client's problems to Google Chat"
+          : "Post to Google Chat when this client disconnects, needs a QR scan, gets stuck or fails to send",
+        onClick: () => actions.setAlertWatch(clientId, !alertWatched),
+      }]
+    : []
 
   return (
     <div className="client-row">
       <div className="client-info">
         <div className="client-id-line">
           <span className="client-id">{clientId}</span>
+          {alertWatched && (
+            <span className="alert-watch" title="Alerts on: problems are posted to Google Chat" aria-label="Alerts on">
+              <Icon name="bell" size={13} />
+            </span>
+          )}
           <button className="btn-copy" onClick={() => actions.copyId(clientId)} title="Copy client ID" aria-label={`Copy ${clientId}`}>
             <Icon name="copy" size={13} />
           </button>
@@ -81,6 +98,11 @@ export default function ClientRow({
         </div>
         <div className="action-sep" />
         <div className="action-group">
+          {showQrButton && state === "QR_REQUIRED" && (
+            <button className="btn-qr" onClick={() => actions.openQr(clientId)} title="Show the QR code to link a phone">
+              <Icon name="qr" /> Show QR
+            </button>
+          )}
           {meta.canReconnect && (
             <button className="btn-control" onClick={() => actions.reconnect(clientId)}>Reconnect</button>
           )}
@@ -91,6 +113,7 @@ export default function ClientRow({
           <ActionMenu
             label={`More actions for ${clientId}`}
             items={[
+              ...alertMenuItem,
               {
                 label: "Reset session + Restart",
                 title: "Wipe the WhatsApp session, then restart (QR scan needed)",

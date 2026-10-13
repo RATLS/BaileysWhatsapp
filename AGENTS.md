@@ -69,6 +69,7 @@ Services:
 - `api`: Fastify routes + websocket gateway + stream consumer
 - `redis`: command/state/queue/event store
 - `dashboard`: operations UI + server for container log access
+- `alerter`: Google Chat alerts for watched clients (read-only towards worker/API keys)
 
 Primary event path is Redis Streams (`wa:events:stream`). Pub/sub files exist but are legacy.
 
@@ -155,6 +156,19 @@ Must remain true unless explicitly approved otherwise:
   - tagging must never block, fail, or alter a request (errors are warned and swallowed)
   - `GET /debug/client-envs`, `PUT /clients/:clientId/env`, `DELETE /clients/:clientId/env`
 - `GET /debug/queue-counts` returns `{ counts, total }` for all clients in one call
+- Alert watch list (`api/routes/alerts.js`):
+  - `GET /alerts/watched`, `PUT /clients/:clientId/alerts/watch`, `DELETE /clients/:clientId/alerts/watch`
+  - `DELETE /clients/:clientId` also removes the client from `wa:alerts:watched`
+
+## Alerter Contract (`alerter/`)
+
+- Must stay read-only towards keys owned by the worker/API (state, queues, msglog, env). It writes only
+  `wa:alerts:open`, `wa:alerts:dailyOkDate` and its own consumer group `alerters`.
+- Its consumer group is independent of `api-consumers`; it must never ack or claim for other groups.
+- Only clients in `wa:alerts:watched` produce alerts. One message per open problem; recovery goes to the same thread.
+- An alert is recorded open only after Google Chat accepted it.
+- `GOOGLE_CHAT_WEBHOOK_URL` is a secret: only from `.env`, never logged, never committed. Empty = dry run.
+- Local testing must use a private test space or dry run — never a team space.
 
 ---
 
@@ -175,6 +189,10 @@ Must remain true unless explicitly approved otherwise:
 - Row actions are state-aware (Reconnect only for `DISCONNECTED`/`LOGGED_OUT`/`STOPPED`, Stop hidden for `STOPPED`).
 - Dashboard tunables live in `dashboard/src/config.js` (`VITE_*` overrides); don't hardcode them in components.
 - Newer endpoints must degrade gracefully on older APIs (404 → feature off, no repeated errors).
+- QR linking uses the existing API websocket (`/ws`), not a new endpoint; the "Show QR" button can be hidden
+  via Settings → Dashboard options.
+- Dashboard on/off options are declared in `DASHBOARD_OPTIONS` (`dashboard/src/config.js`), stored per browser;
+  add new options there rather than ad-hoc localStorage keys.
 
 ---
 
@@ -191,6 +209,10 @@ Must remain true unless explicitly approved otherwise:
 - `wa:msglog:<clientId>` — Redis sorted set; score = Unix ms timestamp; member = JSON `{ phoneNumber, sentAt, status, text, fileCount, failReason? }`; entries older than 7 days are trimmed inline on each write; NOT deleted on client delete
 - `wa:clients:env` — Redis hash `clientId -> dev|test|uat|prod`; set once by the API; deleted on client delete
 - `wa:clients:envMismatch` — Redis hash `clientId -> comma-separated other envs`; warning only; deleted on client delete or manual env set
+- `wa:alerts:watched` — Redis set of watched clientIds; written by the API; removed on client delete
+- `wa:alerts:open` — Redis hash `clientId|kind -> JSON` of open alerts (incl. Google Chat thread key); owned by the alerter
+- `wa:alerts:dailyOkDate` — Redis string, last daily "all OK" date; owned by the alerter
+- consumer group `alerters` on `wa:events:stream` — owned by the alerter
 
 ---
 
@@ -203,7 +225,7 @@ Must remain true unless explicitly approved otherwise:
 5. `api/routes/clients.js`
 6. `api/routes/messages.js`
 7. `dashboard/src/App.jsx`, `dashboard/src/config.js`, `dashboard/src/components/`
-8. `api/envTagger.js`
+8. `api/envTagger.js`, `alerter/alerter.js`, `alerter/rules.js`
 9. `api/tests/*.test.js` (includes `messageLogs.routes.test.js`, `envTagger.test.js`)
 10. `worker/tests/*.test.js`
 
@@ -224,6 +246,7 @@ When changing queue/state/event behavior:
 
 - API tests run with `cd api && npm test`.
 - Worker tests run with `cd worker && npm test`.
+- Alerter tests run with `cd alerter && npm test`.
 - Current automated coverage includes:
   - API config, client, queue, and message validation routes
   - stream consumer payload validation, ack flow, and DLQ handling
@@ -233,6 +256,7 @@ When changing queue/state/event behavior:
   - message log API: pagination, limit clamping, `before` cursor, field shapes, malformed-entry handling
   - queue `offset` paging, `/debug/queue-counts`
   - environment labels: detection, label-once, mismatch, ignored callers, error swallowing, manual routes, delete cleanup, websocket tagging
+  - alert watch routes; alerter rules, delivery, threading, batching, restart safety, daily OK, Google Chat retries/dry run
 - Prefer adding focused tests beside the changed surface before expanding broader integration coverage.
 
 ---

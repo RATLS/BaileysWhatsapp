@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createApiClient, clientPath } from "./api.js"
 import { DEFAULT_API_BASE, ENV_META, REFRESH_INTERVAL_MS, UNKNOWN_ENV } from "./config.js"
 import { copyText } from "./utils.js"
-import { usePageVisible } from "./hooks.js"
+import { useDashboardOptions, usePageVisible } from "./hooks.js"
 import Toasts, { useToasts } from "./components/Toasts.jsx"
 import Icon from "./components/Icon.jsx"
 import StatsBar from "./components/StatsBar.jsx"
@@ -12,6 +12,7 @@ import MessageLogModal from "./components/MessageLogModal.jsx"
 import HistoryModal from "./components/HistoryModal.jsx"
 import SettingsModal from "./components/SettingsModal.jsx"
 import ServiceLogs from "./components/ServiceLogs.jsx"
+import QrModal from "./components/QrModal.jsx"
 
 const API_BASE_STORAGE_KEY = "apiBase"
 const TABS = [
@@ -22,7 +23,8 @@ const EMPTY_SNAPSHOT = { states: {}, active: [], ws: {} }
 const EMPTY_ENVS = { envs: {}, mismatches: {} }
 // Endpoints newer than some deployed APIs; a 404 turns the feature off
 // for the current API endpoint instead of erroring on every refresh.
-const ALL_FEATURES = { envs: true, queueCounts: true }
+const ALL_FEATURES = { envs: true, queueCounts: true, alerts: true }
+const EMPTY_WATCHED = new Set()
 
 function loadApiBase() {
   try {
@@ -54,10 +56,12 @@ export default function App() {
   const apiRef = useRef(api)
   const { toasts, notify, dismiss } = useToasts()
   const pageVisible = usePageVisible()
+  const [options, setOption] = useDashboardOptions()
 
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT)
   const [queueCounts, setQueueCounts] = useState(null)
   const [clientEnvs, setClientEnvs] = useState(EMPTY_ENVS)
+  const [alertWatched, setAlertWatched] = useState(EMPTY_WATCHED)
   const [features, setFeatures] = useState(ALL_FEATURES)
   const featuresRef = useRef(ALL_FEATURES)
   const [loading, setLoading] = useState(false)
@@ -111,13 +115,15 @@ export default function App() {
       setLastRefresh(new Date())
       setApiDown(null)
 
-      const [counts, envData] = await Promise.all([
+      const [counts, envData, watchedData] = await Promise.all([
         optional("queueCounts", "/debug/queue-counts"),
         optional("envs", "/debug/client-envs"),
+        optional("alerts", "/alerts/watched"),
       ])
       if (!isCurrent()) return
       if (counts) setQueueCounts({ counts: counts.counts || {}, total: counts.total ?? 0 })
       if (envData) setClientEnvs({ envs: envData.envs || {}, mismatches: envData.mismatches || {} })
+      if (watchedData) setAlertWatched(new Set(watchedData.watched || []))
     } finally {
       inFlight.current = false
       setLoading(false)
@@ -133,6 +139,7 @@ export default function App() {
     setSnapshot(EMPTY_SNAPSHOT)
     setQueueCounts(null)
     setClientEnvs(EMPTY_ENVS)
+    setAlertWatched(EMPTY_WATCHED)
     setApiDown(null)
     setLastRefresh(null)
     inFlight.current = false
@@ -168,6 +175,7 @@ export default function App() {
     openQueue: (clientId) => setModal({ kind: "queue", clientId }),
     openLogs: (clientId) => setModal({ kind: "logs", clientId }),
     openHistory: (clientId) => setModal({ kind: "history", clientId }),
+    openQr: (clientId) => setModal({ kind: "qr", clientId }),
     copyId: async (clientId) => {
       try {
         await copyText(clientId)
@@ -214,6 +222,11 @@ export default function App() {
       env ? `${clientId} set to ${ENV_META[env].label}` : `${clientId} environment cleared`,
       `Updating environment failed for ${clientId}`
     ),
+    setAlertWatch: (clientId, watch) => runAction(
+      () => (watch ? api.put(clientPath(clientId, "/alerts/watch")) : api.del(clientPath(clientId, "/alerts/watch"))),
+      watch ? `Alerts on for ${clientId} — problems will be posted to Google Chat` : `Alerts off for ${clientId}`,
+      `Changing alerts failed for ${clientId}`
+    ),
   }), [api, notify, runAction])
 
   const createClient = (clientId) => runAction(
@@ -246,6 +259,7 @@ export default function App() {
       queueCount: queueCounts ? queueCounts.counts[id] || 0 : 0,
       env: envOf(id),
       otherEnvs: clientEnvs.mismatches[id] || [],
+      alertWatched: alertWatched.has(id),
     }))
   const isFiltering = Boolean(needle) || stateFilter !== "all" || effectiveEnvFilter !== "all"
 
@@ -316,6 +330,8 @@ export default function App() {
             onEnvFilter={setEnvFilter}
             envCounts={envCounts}
             envSupported={features.envs}
+            alertsSupported={features.alerts}
+            showQrButton={options.showQrButton}
             isFiltering={isFiltering}
             onClearFilters={clearFilters}
             onCreate={createClient}
@@ -335,11 +351,21 @@ export default function App() {
       {modal?.kind === "history" && (
         <HistoryModal api={api} clientId={modal.clientId} onClose={closeModal} notify={notify} />
       )}
+      {modal?.kind === "qr" && (
+        <QrModal
+          apiBase={apiBase}
+          clientId={modal.clientId}
+          onClose={closeModal}
+          onRestart={() => actions.restart(modal.clientId, false)}
+        />
+      )}
       {modal?.kind === "settings" && (
         <SettingsModal
           api={api}
           apiBase={apiBase}
           onApiBaseChange={changeApiBase}
+          options={options}
+          onOptionChange={setOption}
           onClose={closeModal}
           notify={notify}
         />

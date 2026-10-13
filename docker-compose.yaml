@@ -72,6 +72,31 @@ services:
         limits:
           memory: 100M
 
+  alerter:
+    build: ./alerter
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
+      # Secret, set in .env. Empty = dry run (messages are only logged).
+      GOOGLE_CHAT_WEBHOOK_URL: "${GOOGLE_CHAT_WEBHOOK_URL:-}"
+      ALERT_INSTANCE_NAME: "${ALERT_INSTANCE_NAME:-}"
+      ALERT_DASHBOARD_URL: "${ALERT_DASHBOARD_URL:-}"
+      ALERT_TIMEZONE: "${ALERT_TIMEZONE:-Asia/Kolkata}"
+      ALERT_DAILY_OK_TIME: "${ALERT_DAILY_OK_TIME:-10:00}"
+      ALERT_DISCONNECT_GRACE_MS: "${ALERT_DISCONNECT_GRACE_MS:-180000}"
+      ALERT_QR_GRACE_MS: "${ALERT_QR_GRACE_MS:-600000}"
+      ALERT_QUEUE_STUCK_MS: "${ALERT_QUEUE_STUCK_MS:-600000}"
+      ALERT_FAILURE_THRESHOLD: "${ALERT_FAILURE_THRESHOLD:-5}"
+      LOG_LEVEL: "info"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+          cpus: '0.25'
+
   proxy:
     image: nginx:1.27-alpine
     depends_on:

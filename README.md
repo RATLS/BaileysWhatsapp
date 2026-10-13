@@ -26,6 +26,7 @@ The architecture is deliberately split into control-plane and execution-plane se
 - `worker`: owns Baileys sockets and drains outbound queues
 - `redis`: shared system state, command bus, queue store, QR cache, and event stream
 - `dashboard`: operational UI plus authenticated log viewer
+- `alerter`: posts Google Chat alerts when watched clients have problems (see 4.5)
 - `proxy`: Nginx TLS terminator in front of the API
 
 ## 2) Mental Model
@@ -179,6 +180,52 @@ Purpose:
 
 The API itself stays on internal Docker port `3000`; external HTTPS/WSS should go through Nginx on `443`.
 
+### 4.5 `alerter`
+
+Primary files:
+
+- `alerter/index.js` (wiring), `alerter/alerter.js` (checks + delivery), `alerter/rules.js` (pure decisions),
+  `alerter/messages.js` (wording), `alerter/googleChat.js` (webhook sender), `alerter/config.js` (env settings)
+
+Purpose: tell the team in Google Chat when a **watched** client has a problem, and again when it recovers.
+It is a separate container so it keeps working when the API is down. It never writes to keys the worker
+or API own, so queue/delivery behaviour is unaffected.
+
+Which clients: only those in `wa:alerts:watched`, toggled per client in the dashboard (`⋯` → "Watch for alerts").
+
+What it alerts on (defaults, all configurable):
+
+| Problem | Alert after |
+|---|---|
+| disconnected (`DISCONNECTED`, `CONNECTING`, `CREATED`) | 3 min (`ALERT_DISCONNECT_GRACE_MS`) |
+| logged out (needs QR rescan) | immediately |
+| waiting for QR (`QR_REQUIRED`) | 10 min (`ALERT_QR_GRACE_MS`) |
+| queue not shrinking while `CONNECTED` | 10 min (`ALERT_QUEUE_STUCK_MS`) |
+| failed sends in the last 10 min | ≥ 5 (`ALERT_FAILURE_THRESHOLD`); closes when the window has none |
+
+How it works:
+
+- every 15 s it reads `wa:clients:state`, queue lengths and recent `wa:msglog` entries for watched clients
+- it also reads `wa:events:stream` through its own consumer group `alerters` (starts at `$`, never replays
+  history), only to catch `LOGGED_OUT`, which the worker replaces with a new QR cycle within seconds
+- one message per problem, in its own Google Chat thread; updates (e.g. disconnected → logged out) and the
+  "✅ back online" message go into the same thread
+- 3+ new problems (or recoveries) in one check are combined into one message (Google Chat allows ~1 msg/s)
+- open alerts are stored in `wa:alerts:open`, so restarts don't repeat or falsely close them; an alert is
+  only recorded once Google Chat accepted it (otherwise it is retried on the next check)
+- stopping, deleting or un-watching a client closes its alert with a note
+- posts "🟢 Alerter started" on every start and a daily "all OK" summary at `ALERT_DAILY_OK_TIME`
+  (default 10:00 `ALERT_TIMEZONE`, `off` disables); if the daily message is missing, the alerter or server is down
+
+Configuration (`.env`, see `.env.example`):
+
+- `GOOGLE_CHAT_WEBHOOK_URL` — **secret**; empty = dry run (messages are only logged, nothing is sent)
+- `ALERT_INSTANCE_NAME` (e.g. `local` → every message starts with `[local]`), `ALERT_DASHBOARD_URL`
+- thresholds above, `ALERT_TIMEZONE`, `ALERT_DAILY_OK_TIME`
+
+Not covered yet (planned step 2): system alerts (API/worker/Redis down, container restarts, disk, DLQ).
+Known limit: if the whole server or the alerter is down, nothing can alert — the missing daily message is the signal.
+
 ## 5) Redis Data Model
 
 These keys are the runtime contracts the rest of the code assumes:
@@ -224,6 +271,19 @@ These keys are the runtime contracts the rest of the code assumes:
 - `wa:clients:envMismatch`
   Redis hash of `clientId -> comma-separated envs` that used the client after it was labelled differently.
   Warning only; cleared when the env is set manually or the client is deleted.
+
+- `wa:alerts:watched`
+  Redis set of clientIds the alerter watches. Written by the API (`PUT/DELETE /clients/:clientId/alerts/watch`),
+  removed on client delete.
+
+- `wa:alerts:open`
+  Redis hash `clientId|kind -> JSON` of alerts currently open (kind: `connection`, `queue_stuck`, `send_failures`),
+  including the Google Chat thread key. Owned by the alerter.
+
+- `wa:alerts:dailyOkDate`
+  Redis string, date (in `ALERT_TIMEZONE`) of the last daily "all OK" message. Owned by the alerter.
+
+- consumer group `alerters` on `wa:events:stream` — the alerter's own group, independent of `api-consumers`.
 
 ## 6) Client States
 
@@ -707,6 +767,13 @@ Broadcast model:
 
 These endpoints are operational/debug tooling, not hardened admin APIs.
 
+### 13.6.1 Alert watch list
+
+- `GET /alerts/watched` → `{ watched: [clientId...] }` (sorted)
+- `PUT /clients/:clientId/alerts/watch` → `{ ok, clientId, watched: true }`
+- `DELETE /clients/:clientId/alerts/watch` → `{ ok, clientId, watched: false }`
+- invalid `clientId` → `400`; changes take effect on the alerter's next check (≤ 15 s)
+
 ### 13.7 Client environment labels
 
 Every client gets the environment (`dev`, `test`, `uat`, `prod`) of whoever uses it. Nothing about
@@ -774,7 +841,16 @@ Windows:
 - CSV exports are UTF-8 with BOM (opens correctly in Excel) and escape cells starting with `= + - @`
   so message text can't run as a spreadsheet formula
 - History: date range plus Today / 7 days / 30 days presets, Export JSON, Delete File
-- Settings: API endpoint (validated, stored in localStorage), send delay (min ≤ max and range checked)
+- Settings: dashboard options (on/off switches, per browser), API endpoint (validated, stored in localStorage),
+  send delay (min ≤ max and range checked)
+- Link phone (QR): "Show QR" on rows in `QR_REQUIRED` (hidden when Settings → "Show QR button" is off).
+  The window subscribes to the API websocket (`/ws`) for that client, renders each new QR as WhatsApp rotates it,
+  and shows "Linked" once the client reports `CONNECTED`. No extra API endpoint; QR images are drawn in the
+  browser with the `qrcode` package.
+
+Dashboard options (Settings → Dashboard options) are defined in `DASHBOARD_OPTIONS` in
+`dashboard/src/config.js` and saved per browser (`localStorage` key `dashboardOptions`). To add one, add an
+entry there and read `options.<key>` where it is used.
 
 Service Logs tab:
 
@@ -858,6 +934,10 @@ Current compose environment highlights:
   - `DASH_PORT`
   - `DASH_LOG_SERVICES` (optional; services shown in Service Logs, default `worker,api,redis,dashboard`)
 
+- alerter:
+  - `GOOGLE_CHAT_WEBHOOK_URL` (secret, from `.env`; empty = dry run), `ALERT_*` settings (see 4.5)
+  - memory limit 96 MB (uses ~20 MB), `restart: unless-stopped`
+
 ## 16) TLS / Proxy Setup
 
 The proxy expects these files:
@@ -891,6 +971,8 @@ Current automated tests live in:
 - `api/tests/streamConsumer.test.js`
 - `worker/tests/socketManager.test.js`
 - `worker/tests/startupRehydrate.test.js`
+- `api/tests/alerts.routes.test.js`
+- `alerter/tests/rules.test.js`, `alerter/tests/alerter.test.js`, `alerter/tests/googleChat.test.js`
 
 What is covered today:
 
@@ -911,6 +993,12 @@ What is covered today:
 - message log write on send failure with `failReason`
 - message log errors do not block delivery or requeue
 - message log API: empty client, newest-first ordering, default/min/max limit, total vs returned, `before` cursor pagination, failed entry with `failReason`, sent entry without `failReason`, malformed entry handling, full field shape
+- persistent history returns empty (not 500) for a client with no log file
+- alert watch list routes; watch removed on client delete
+- alerter: grace periods, immediate logout (incl. via event while state is already `QR_REQUIRED`), stale events
+  ignored, thread updates on worsening, no duplicate/false recovery after restart, batching, retry when Google
+  Chat rejects, stop/unwatch closing, queue-stuck and send-failure alerts, daily OK once per day, message framing;
+  Google Chat sender threading, retries/backoff, no URL in logs, rate spacing, dry run
 
 How to run tests:
 
@@ -920,6 +1008,10 @@ cd api && npm test
 
 ```bash
 cd worker && npm test
+```
+
+```bash
+cd alerter && npm test
 ```
 
 ## 18) Files To Read Before Changing Behavior

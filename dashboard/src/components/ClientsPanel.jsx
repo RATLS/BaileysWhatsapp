@@ -22,6 +22,8 @@ export default function ClientsPanel({
   onEnvFilter,
   envCounts,
   envSupported,
+  alertsSupported,
+  showQrButton,
   isFiltering,
   onClearFilters,
   onCreate,
@@ -72,7 +74,14 @@ export default function ClientsPanel({
 
       <div className="client-list">
         {rows.map((row) => (
-          <ClientRow key={row.clientId} {...row} envSupported={envSupported} actions={actions} />
+          <ClientRow
+            key={row.clientId}
+            {...row}
+            envSupported={envSupported}
+            alertsSupported={alertsSupported}
+            showQrButton={showQrButton}
+            actions={actions}
+          />
         ))}
       </div>
     </div>

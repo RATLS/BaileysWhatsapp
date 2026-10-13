@@ -19,6 +19,7 @@ const start = async () => {
     fastify.register(require("./routes/messages"))
     fastify.register(require("./routes/debug-routes"))
     fastify.register(require("./routes/clientEnv"))
+    fastify.register(require("./routes/alerts"))
 
     const { startConsumer } = require("./streamConsumer")
     startConsumer().catch(err => {

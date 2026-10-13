@@ -7,6 +7,7 @@ const { warn } = require("../logger")
 
 const MSGLOGS_DIR = "/logs/msglogs"
 const STATE_KEY = "wa:clients:state"
+const ALERT_WATCHED_KEY = "wa:alerts:watched"
 const SEND_DELAY_CONFIG_KEY = "wa:config:sendDelay"
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{1,120}$/
 const DEFAULT_SEND_DELAY_MIN_MS = 3000
@@ -177,6 +178,12 @@ module.exports = async function (fastify) {
       await fastify.envTagger.forget(clientId)
     } catch (err) {
       warn(`⚠️ Failed to clear env label for ${clientId}:`, err && err.message ? err.message : err)
+    }
+
+    try {
+      await redis.srem(ALERT_WATCHED_KEY, clientId)
+    } catch (err) {
+      warn(`⚠️ Failed to remove ${clientId} from the alert watch list:`, err && err.message ? err.message : err)
     }
 
     return { ok: true, clientId }

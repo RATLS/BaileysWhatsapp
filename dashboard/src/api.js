@@ -41,6 +41,15 @@ export function createApiClient(baseUrl) {
   }
 }
 
+// API websocket URL for live client updates: http→ws, https→wss, path /ws.
+export function websocketUrl(baseUrl) {
+  const url = new URL(baseUrl)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/ws`
+  url.search = ""
+  return url.toString()
+}
+
 export function clientPath(clientId, suffix = "") {
   return `/clients/${encodeURIComponent(clientId)}${suffix}`
 }

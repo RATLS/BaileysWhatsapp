@@ -39,6 +39,21 @@ export const SERVICE_LOG_TAIL_OPTIONS = [200, 500, 1000, 2000]
 
 // Queue jobs of this type are the normal case, so no type tag is shown for them.
 export const DEFAULT_JOB_TYPE = "SEND_MESSAGE"
+
+// On/off options in Settings → "Dashboard options", saved per browser.
+// To add an option: add an entry here, then read `options.<key>` where needed.
+export const DASHBOARD_OPTIONS = [
+  {
+    key: "showQrButton",
+    label: "Show QR button",
+    help: "Adds a \"Show QR\" button to clients waiting for a QR scan, so a phone can be linked from the dashboard.",
+    default: true,
+  },
+]
+
+// QR window: how often to re-request the current QR over the websocket
+// (WhatsApp rotates the code roughly every 20 s; the API also pushes new ones).
+export const QR_RESYNC_MS = positiveNumber(env.VITE_QR_RESYNC_MS, 15000)
 export const SERVICE_LOG_REFRESH_MS = positiveNumber(env.VITE_SERVICE_LOG_REFRESH_MS, 5000)
 
 // Display order = order of the state filter chips.

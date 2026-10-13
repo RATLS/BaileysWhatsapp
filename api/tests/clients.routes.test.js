@@ -10,6 +10,7 @@ function createRedisMock() {
   const kv = new Map()
   const hashes = new Map()
   const lists = new Map()
+  const sets = new Map()
 
   return {
     async get(key) {
@@ -38,6 +39,17 @@ function createRedisMock() {
     },
     async hdel(key, field) {
       return hashes.get(key)?.delete(field) ? 1 : 0
+    },
+    async sadd(key, member) {
+      if (!sets.has(key)) sets.set(key, new Set())
+      sets.get(key).add(member)
+      return 1
+    },
+    async srem(key, member) {
+      return sets.get(key)?.delete(member) ? 1 : 0
+    },
+    async smembers(key) {
+      return [...(sets.get(key) ?? [])]
     },
     async llen(key) {
       return lists.get(key)?.length ?? 0
@@ -309,8 +321,10 @@ test("DELETE /clients/:clientId/queue clears queued messages", async (t) => {
   assert.equal(await redis.llen("wa:pending:client-2"), 0)
 })
 
-test("DELETE /clients/:clientId enqueues DELETE_CLIENT and clears the env label", async (t) => {
+test("DELETE /clients/:clientId enqueues DELETE_CLIENT and clears the env label and alert watch", async (t) => {
   const redis = createRedisMock()
+  await redis.sadd("wa:alerts:watched", "client-1")
+  await redis.sadd("wa:alerts:watched", "client-2")
   redis.seedHash("wa:clients:env", { "client-1": "prod", "client-2": "dev" })
   redis.seedHash("wa:clients:envMismatch", { "client-1": "dev" })
   const { app, modulePath } = await buildApp(redis)
@@ -326,6 +340,7 @@ test("DELETE /clients/:clientId enqueues DELETE_CLIENT and clears the env label"
   assert.deepEqual(JSON.parse(commands[0]), { type: "DELETE_CLIENT", clientId: "client-1" })
   assert.deepEqual(await redis.hgetall("wa:clients:env"), { "client-2": "dev" })
   assert.deepEqual(await redis.hgetall("wa:clients:envMismatch"), {})
+  assert.deepEqual(await redis.smembers("wa:alerts:watched"), ["client-2"])
 })
 
 test("GET /clients/:clientId/logs/persistent returns empty history when the client has no log file", async (t) => {

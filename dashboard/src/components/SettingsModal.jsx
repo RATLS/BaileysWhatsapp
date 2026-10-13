@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react"
 import Modal from "./Modal.jsx"
-import { DEFAULT_API_BASE, SEND_DELAY_BOUNDS, SEND_DELAY_FALLBACK } from "../config.js"
+import Toggle from "./Toggle.jsx"
+import { DASHBOARD_OPTIONS, DEFAULT_API_BASE, SEND_DELAY_BOUNDS, SEND_DELAY_FALLBACK } from "../config.js"
 import { isValidHttpUrl } from "../utils.js"
 
 function validateDelay(form) {
@@ -14,7 +15,7 @@ function validateDelay(form) {
   return ""
 }
 
-export default function SettingsModal({ api, apiBase, onApiBaseChange, onClose, notify }) {
+export default function SettingsModal({ api, apiBase, onApiBaseChange, options, onOptionChange, onClose, notify }) {
   const [apiDraft, setApiDraft] = useState(apiBase)
   const [delay, setDelay] = useState(null)
   const [delayForm, setDelayForm] = useState({ minMs: "", maxMs: "" })
@@ -67,6 +68,21 @@ export default function SettingsModal({ api, apiBase, onApiBaseChange, onClose, 
 
   return (
     <Modal title="Settings" onClose={onClose}>
+      <section className="settings-section">
+        <div className="section-label">Dashboard options</div>
+        {DASHBOARD_OPTIONS.map((opt) => (
+          <Toggle
+            key={opt.key}
+            id={`option-${opt.key}`}
+            label={opt.label}
+            help={opt.help}
+            checked={Boolean(options[opt.key])}
+            onChange={(value) => onOptionChange(opt.key, value)}
+          />
+        ))}
+        <div className="meta">Saved in this browser only.</div>
+      </section>
+
       <section className="settings-section">
         <div className="section-label">API Endpoint</div>
         <div className="inline-form">

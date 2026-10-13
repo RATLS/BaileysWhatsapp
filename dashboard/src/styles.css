@@ -373,6 +373,105 @@ button:focus-visible { outline: 2px solid rgba(245,158,11,0.6); outline-offset: 
   to { transform: rotate(360deg); }
 }
 
+.btn-qr {
+  height: var(--row-btn-h);
+  padding: 0 11px;
+  font-size: 12px;
+  background: rgba(167, 139, 250, 0.14);
+  color: #c4b5fd;
+  border-color: rgba(167, 139, 250, 0.35);
+}
+
+.btn-qr:not(:disabled):hover { background: rgba(167, 139, 250, 0.22); }
+
+/* ── QR window ────────────────────────────────── */
+
+.qr-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+/* White quiet zone around the code: phones read QR codes far better on white. */
+.qr-image {
+  background: #fff;
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.qr-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.qr-done { font-size: 15px; font-weight: 600; color: #4ade80; padding: 24px 0; }
+.qr-wait { color: var(--text-3); font-size: 13px; padding: 40px 0; }
+.qr-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+/* ── Toggle switch ────────────────────────────── */
+
+.toggle-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.toggle-text { display: flex; flex-direction: column; gap: 3px; }
+.toggle-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.toggle-help { font-size: 12px; color: var(--text-3); line-height: 1.4; }
+
+/* Real checkbox stays focusable/accessible but invisible; the track is drawn. */
+.toggle-input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.toggle-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-2);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.toggle-input:checked + .toggle-track { background: rgba(245,158,11,0.25); border-color: rgba(245,158,11,0.55); }
+.toggle-input:checked + .toggle-track .toggle-thumb { transform: translateX(16px); background: var(--accent); }
+.toggle-input:focus-visible + .toggle-track { outline: 2px solid rgba(245,158,11,0.6); outline-offset: 2px; }
+
+.alert-watch {
+  display: inline-flex;
+  color: var(--accent);
+  margin-left: 4px;
+}
+
 /* Copy button appears on row hover / keyboard focus (always on touch screens). */
 .btn-copy {
   background: transparent;
