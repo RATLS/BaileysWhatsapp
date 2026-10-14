@@ -86,7 +86,7 @@
       whatsapp:{title:'WhatsApp',copy:'The worker speaks to WhatsApp through a Baileys multi-device socket. A QR is required for a new session; a saved auth folder lets most restarts reconnect without scanning.',file:'worker/socketManager.js · worker/mediaSender.js'},
       sessions:{title:'Session files',copy:'Baileys auth files live under /sessions/<clientId> and are bind mounted from ./sessions. Ordinary disconnects preserve them; logout, reset, and delete clear them.',file:'worker/sessionUtils.js · worker/startupRehydrate.js'},
       logs:{title:'Log files',copy:'Worker appends persistent JSONL message history under /logs/msglogs and optional per-client operational logs under /logs/clients. The API mounts /logs to read or delete persistent history.',file:'worker/socketManager.js · worker/logger.js · api/routes/clients.js'},
-      alerter:{title:'Alerter',copy:'Standalone container (~20 MB). Every 15 s it reads wa:clients:state, queue lengths and recent wa:msglog entries for clients in wa:alerts:watched. It also reads wa:events:stream through its own consumer group (alerters, created at $) only to catch LOGGED_OUT, which the worker replaces with a QR cycle within seconds. Rules: disconnected > 3 min, logged out at once, QR waiting > 10 min, queue not shrinking for 10 min while CONNECTED, ≥ 5 failed sends in 10 min. Open alerts live in wa:alerts:open (no repeats, survives restarts); recovery and stop/unwatch close them. 3+ at once are combined. Posts “Alerter started” on boot and a daily “all OK”. Read-only towards worker/API keys.',file:'alerter/alerter.js · alerter/rules.js · alerter/messages.js · alerter/config.js'},
+      alerter:{title:'Alerter',copy:'Standalone container (~20 MB). Every 15 s it reads wa:clients:state, queue lengths and recent wa:msglog entries for clients in wa:alerts:watched. It also reads wa:events:stream through its own consumer group (alerters, created at $) only to catch LOGGED_OUT, which the worker replaces with a QR cycle within seconds. Rules: disconnected > 3 min, logged out at once, QR waiting > 10 min, queue not shrinking for 10 min while CONNECTED, ≥ 5 failed sends in 10 min. Open alerts live in wa:alerts:open (no repeats, survives restarts); recovery and stop/unwatch close them. 3+ at once are combined. System checks are always on: API /health and Redis PING failing for 1 min, worker heartbeat (wa:health:worker) older than 2 min, Redis memory ≥ 80%, disk ≥ 85% (read-only mounts, one alert per disk), new dead-letter entries. They close only on positive proof of health. Posts “Alerter started” on boot and a daily “all OK”. Read-only towards worker/API keys; no Docker socket.',file:'alerter/alerter.js · alerter/rules.js · alerter/messages.js · alerter/config.js'},
       gchat:{title:'Google Chat space',copy:'Destination for alerts. The alerter POSTs JSON to the space’s incoming webhook (Google Chat allows about one message per second per space, so sends are spaced and retried on 429/5xx). The webhook URL is a secret kept only in .env (GOOGLE_CHAT_WEBHOOK_URL); without it the alerter runs in dry-run mode and only logs. Use a private test space locally.',file:'alerter/googleChat.js · GOOGLE_CHAT_WEBHOOK_URL in .env'}
     };
     const simpleNodeInfo={
@@ -100,7 +100,7 @@
       whatsapp:'The WhatsApp network that receives messages from the connected account.',
       sessions:'Saved login details. They let an account reconnect after a restart without scanning a new QR code.',
       logs:'Saved records of what happened when messages were sent or failed.',
-      alerter:'The night watch. It checks the accounts you picked every 15 seconds and tells the team when one goes offline, needs a QR scan, gets stuck, or keeps failing — and again when it is fine.',
+      alerter:'The night watch. It checks the accounts you picked every 15 seconds and tells the team when one goes offline, needs a QR scan, gets stuck, or keeps failing. It also warns when the API, Redis or worker stops working, memory or disk is nearly full, or broken updates pile up — and says so again when it is fine.',
       gchat:'The team’s Google Chat space. Alerts and “back online” messages appear here.'
     };
     const flows={
@@ -266,7 +266,11 @@
       {key:'wa:alerts:open',type:'hash',owner:'alerter',summary:'Problems already reported',detail:'Field <clientId>|<kind> (connection, queue_stuck, send_failures) → JSON with reason, since, openedAt and thread key. Written only after Google Chat accepted the alert; removed on recovery, stop, delete or un-watch. Lets the alerter restart without repeating or falsely closing alerts.',
         example:'> HGETALL wa:alerts:open\n\nclient-a|connection  →  {"clientId":"client-a","env":"prod","kind":"connection","reason":"disconnected","since":1790330400000,"openedAt":1790330580000}\n\nOne entry per open problem. When client-a reconnects, a “✅ back online” message is posted and this field is deleted.'},
       {key:'wa:alerts:dailyOkDate',type:'string',owner:'alerter',summary:'Date of the last daily “all OK”',detail:'Stores the date (in ALERT_TIMEZONE) the daily summary was last posted, so restarts never send it twice in one day.',
-        example:'> GET wa:alerts:dailyOkDate\n"2026-10-13"\n\nThe next daily message goes out after 10:00 on 2026-10-14.'}
+        example:'> GET wa:alerts:dailyOkDate\n"2026-10-13"\n\nThe next daily message goes out after 10:00 on 2026-10-14.'},
+      {key:'wa:health:worker',type:'string',owner:'worker → alerter',summary:'Worker’s last sign of life',detail:'The worker SETs the current Unix ms with EX 120 on its existing 30-second tick. The alerter treats a value older than ALERT_WORKER_STALE_MS (2 min) — or no key at all — as the worker being down or frozen.',
+        example:'> GET wa:health:worker\n"1790330700000"\n\n> TTL wa:health:worker\n(integer) 104\n\nRefreshed every 30 s. If the worker stops, the value gets old and the key disappears after 2 minutes.'},
+      {key:'wa:alerts:dlqSeen',type:'string',owner:'alerter',summary:'Dead-letter length already reported',detail:'The wa:events:dlq length the alerter last reported. When XLEN grows past it, one “broken events” notice is posted (at most every 30 min). First run only records the current length.',
+        example:'> GET wa:alerts:dlqSeen\n"12"\n\nIf wa:events:dlq grows to 15, the alerter posts “3 broken event(s) moved to the dead-letter stream” and stores 15.'}
     ];
     const simpleKeys=[
       'A status board: each account name points to its current state, such as CONNECTED or STOPPED.',
@@ -282,7 +286,9 @@
       'A warning list: accounts that a second, different CRM setup has also used.',
       'The accounts you switched on for alerts. Only these can post to Google Chat.',
       'Problems the alerter has already reported, so it does not repeat them and knows what to mark as recovered.',
-      'The day the last “all OK” morning message was sent, so it is sent only once a day.'
+      'The day the last “all OK” morning message was sent, so it is sent only once a day.',
+      'The worker’s “I’m alive” stamp, refreshed every 30 seconds. If it gets old, the worker has stopped.',
+      'How many broken updates the alerter has already warned about, so it only reports new ones.'
     ];
     const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
     let currentFlow='lifecycle',currentStep=0,explanationMode='simple',playing=false,timer=null,raf=null;

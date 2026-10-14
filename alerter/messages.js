@@ -24,6 +24,62 @@ function formatClock(ms, timeZone) {
   }).format(new Date(ms))
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "?"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let value = bytes
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${value >= 10 || i === 0 ? Math.round(value) : value.toFixed(1)} ${units[i]}`
+}
+
+// ── System alerts (API, worker, Redis, disk) ────────────────────────────
+
+function systemProblemLine(alert, ctx) {
+  const since = `${formatDuration(ctx.now - alert.since)} (since ${formatClock(alert.since, ctx.timeZone)})`
+  switch (alert.reason) {
+    case "api_down":
+      return `🔴 *API* is not responding for ${since} — the CRM and dashboard can't queue or manage messages`
+    case "redis_down":
+      return `🔴 *Redis* is unreachable for ${since} — nothing can be queued, sent or tracked`
+    case "worker_down":
+      return Number.isFinite(alert.lastBeat)
+        ? `🔴 *Worker* has stopped reporting — last sign of life ${formatDuration(ctx.now - alert.lastBeat)} ago (${formatClock(alert.lastBeat, ctx.timeZone)}). Messages are not being sent`
+        : `🔴 *Worker* has not reported since the alerter started ${formatDuration(ctx.now - alert.since)} ago. Messages are probably not being sent`
+    case "redis_memory":
+      return `⚠️ *Redis memory* at ${Math.round(alert.pct)}% (${formatBytes(alert.used)} of ${formatBytes(alert.max)}) — near its limit, data may be evicted`
+    case "disk_full":
+      return `⚠️ *Disk* at ${Math.round(alert.pct)}% for ${alert.path} (${formatBytes(alert.free)} free)`
+    default:
+      return `⚠️ *System* problem (${alert.reason})`
+  }
+}
+
+function systemRecoveryLine(alert, ctx) {
+  const lasted = formatDuration(ctx.now - alert.since)
+  switch (alert.reason) {
+    case "api_down":
+      return `✅ *API* is responding again (was down ${lasted})`
+    case "redis_down":
+      return `✅ *Redis* is reachable again (was down ${lasted})`
+    case "worker_down":
+      return `✅ *Worker* is reporting again (was silent ${lasted})`
+    case "redis_memory":
+      return `✅ *Redis memory* back to a safe level`
+    case "disk_full":
+      return `✅ *Disk* usage back to a safe level for ${alert.path}`
+    default:
+      return `✅ *System* problem cleared (${alert.reason})`
+  }
+}
+
+function dlqLine({ newCount, length, stream }) {
+  return `⚠️ ${newCount} broken event(s) moved to the dead-letter stream \`${stream}\` (${length} in total) — status/QR updates were dropped; check the API logs`
+}
+
 function clientLabel(clientId, env) {
   return `*${clientId}*${env ? ` (${env})` : ""}`
 }
@@ -38,6 +94,7 @@ function withFrame(text, cfg) {
 // ── Problem lines (used alone or inside a combined message) ─────────────
 
 function problemLine(alert, ctx) {
+  if (alert.system) return systemProblemLine(alert, ctx)
   const who = clientLabel(alert.clientId, alert.env)
   const since = `${formatDuration(ctx.now - alert.since)} (since ${formatClock(alert.since, ctx.timeZone)})`
   switch (alert.reason) {
@@ -57,6 +114,7 @@ function problemLine(alert, ctx) {
 }
 
 function recoveryLine(alert, ctx) {
+  if (alert.system) return systemRecoveryLine(alert, ctx)
   const who = clientLabel(alert.clientId, alert.env)
   const lasted = formatDuration(ctx.now - alert.since)
   switch (alert.closeReason) {
@@ -104,6 +162,8 @@ function dailyOkMessage({ watched, openAlerts }, ctx, cfg) {
 }
 
 module.exports = {
+  formatBytes,
+  dlqLine,
   formatDuration,
   formatClock,
   withFrame,

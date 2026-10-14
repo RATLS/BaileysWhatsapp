@@ -25,8 +25,19 @@ async function removeClientState(clientId) {
   await redis.hdel(KEY, clientId)
 }
 
+// Liveness signal for the alerter: timestamp of the last worker tick.
+// Expires on its own, so a dead worker leaves no fresh value behind.
+const HEARTBEAT_KEY = "wa:health:worker"
+const HEARTBEAT_TTL_SECONDS = 120
+
+async function writeHeartbeat(now = Date.now()) {
+  await redis.set(HEARTBEAT_KEY, String(now), "EX", HEARTBEAT_TTL_SECONDS)
+}
+
 module.exports = {
   STATES,
   setClientState,
-  removeClientState
+  removeClientState,
+  writeHeartbeat,
+  HEARTBEAT_KEY
 }

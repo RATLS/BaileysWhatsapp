@@ -162,8 +162,12 @@ Must remain true unless explicitly approved otherwise:
 
 ## Alerter Contract (`alerter/`)
 
-- Must stay read-only towards keys owned by the worker/API (state, queues, msglog, env). It writes only
-  `wa:alerts:open`, `wa:alerts:dailyOkDate` and its own consumer group `alerters`.
+- Must stay read-only towards keys owned by the worker/API (state, queues, msglog, env, heartbeat). It writes only
+  `wa:alerts:open`, `wa:alerts:dailyOkDate`, `wa:alerts:dlqSeen` and its own consumer group `alerters`.
+- System alerts (API, Redis, worker heartbeat, Redis memory, disk, dead-letter growth) are always on; they close
+  only on positive proof of health. The alerter must start and alert even when Redis is down.
+- No Docker socket in the alerter (deliberate); disk is measured through read-only mounts only.
+- The worker's `wa:health:worker` write (in its existing 30 s tick) must never throw or block the worker.
 - Its consumer group is independent of `api-consumers`; it must never ack or claim for other groups.
 - Only clients in `wa:alerts:watched` produce alerts. One message per open problem; recovery goes to the same thread.
 - An alert is recorded open only after Google Chat accepted it.
@@ -212,6 +216,8 @@ Must remain true unless explicitly approved otherwise:
 - `wa:alerts:watched` — Redis set of watched clientIds; written by the API; removed on client delete
 - `wa:alerts:open` — Redis hash `clientId|kind -> JSON` of open alerts (incl. Google Chat thread key); owned by the alerter
 - `wa:alerts:dailyOkDate` — Redis string, last daily "all OK" date; owned by the alerter
+- `wa:alerts:dlqSeen` — Redis string, last reported `wa:events:dlq` length; owned by the alerter
+- `wa:health:worker` — Redis string, worker's last tick (Unix ms), `EX 120`; written by the worker, read by the alerter
 - consumer group `alerters` on `wa:events:stream` — owned by the alerter
 
 ---
@@ -257,6 +263,7 @@ When changing queue/state/event behavior:
   - queue `offset` paging, `/debug/queue-counts`
   - environment labels: detection, label-once, mismatch, ignored callers, error swallowing, manual routes, delete cleanup, websocket tagging
   - alert watch routes; alerter rules, delivery, threading, batching, restart safety, daily OK, Google Chat retries/dry run
+  - alerter system checks: API/Redis/worker down, Redis memory, disk (grouped per disk), dead-letter growth, no false recovery
 - Prefer adding focused tests beside the changed surface before expanding broader integration coverage.
 
 ---

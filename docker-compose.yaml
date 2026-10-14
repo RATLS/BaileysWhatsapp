@@ -89,7 +89,18 @@ services:
       ALERT_QR_GRACE_MS: "${ALERT_QR_GRACE_MS:-600000}"
       ALERT_QUEUE_STUCK_MS: "${ALERT_QUEUE_STUCK_MS:-600000}"
       ALERT_FAILURE_THRESHOLD: "${ALERT_FAILURE_THRESHOLD:-5}"
+      # System checks
+      ALERT_API_HEALTH_URL: "${ALERT_API_HEALTH_URL:-http://api:3000/health}"
+      ALERT_SYSTEM_GRACE_MS: "${ALERT_SYSTEM_GRACE_MS:-60000}"
+      ALERT_WORKER_STALE_MS: "${ALERT_WORKER_STALE_MS:-120000}"
+      ALERT_REDIS_MEMORY_PCT: "${ALERT_REDIS_MEMORY_PCT:-80}"
+      ALERT_DISK_PCT: "${ALERT_DISK_PCT:-85}"
+      ALERT_DISK_PATHS: "/mnt/sessions,/mnt/logs"
       LOG_LEVEL: "info"
+    volumes:
+      # Read-only, only used to measure free disk space.
+      - ./sessions:/mnt/sessions:ro
+      - ./logs:/mnt/logs:ro
     restart: unless-stopped
     deploy:
       resources:

@@ -20,19 +20,35 @@ function baseCfg(overrides = {}) {
     batchThreshold: 3,
     dailyOkTime: "", // off unless a test turns it on
     eventMaxAgeMs: 5 * MIN,
+    // System checks: healthy by default; individual tests break one thing.
+    apiHealthUrl: "",
+    systemGraceMs: MIN,
+    workerStaleMs: 2 * MIN,
+    probeTimeoutMs: 1000,
+    redisMemoryPct: 80,
+    diskPct: 85,
+    diskPaths: [],
+    dlqStream: "wa:events:dlq",
+    dlqCooldownMs: 30 * MIN,
     ...overrides,
   }
 }
 
-function createFakeRedis() {
+function createFakeRedis(clockRef) {
   const sets = new Map()
   const hashes = new Map()
   const lists = new Map()
   const zsets = new Map()
   const strings = new Map()
   const hash = (k) => { if (!hashes.has(k)) hashes.set(k, new Map()); return hashes.get(k) }
+  const sys = { up: true, heartbeat: "fresh", usedMemory: 10, maxMemory: 100, dlqLength: 0 }
+  const guard = () => { if (!sys.up) throw new Error("connect ECONNREFUSED") }
   return {
-    async smembers(k) { return [...(sets.get(k) || [])] },
+    sys,
+    async ping() { guard(); return "PONG" },
+    async info() { guard(); return `# Memory\r\nused_memory:${sys.usedMemory}\r\nmaxmemory:${sys.maxMemory}\r\n` },
+    async xlen() { guard(); return sys.dlqLength },
+    async smembers(k) { guard(); return [...(sets.get(k) || [])] },
     async hgetall(k) { return Object.fromEntries(hash(k)) },
     async hset(k, f, v) { hash(k).set(f, v); return 1 },
     async hdel(k, f) { return hash(k).delete(f) ? 1 : 0 },
@@ -40,7 +56,14 @@ function createFakeRedis() {
     async zrangebyscore(k, min) {
       return (zsets.get(k) || []).filter((e) => e.score >= min).map((e) => e.member)
     },
-    async get(k) { return strings.has(k) ? strings.get(k) : null },
+    async get(k) {
+      guard()
+      if (k === "wa:health:worker") {
+        if (sys.heartbeat === "fresh") return String(clockRef.now)
+        return sys.heartbeat === null ? null : String(sys.heartbeat)
+      }
+      return strings.has(k) ? strings.get(k) : null
+    },
     async set(k, v) { strings.set(k, v); return "OK" },
     // helpers
     watch(...ids) { sets.set("wa:alerts:watched", new Set([...(sets.get("wa:alerts:watched") || []), ...ids])) },
@@ -58,10 +81,10 @@ function createFakeRedis() {
   }
 }
 
-function setup({ cfg = {}, sendResult = true } = {}) {
-  const redis = createFakeRedis()
+function setup({ cfg = {}, sendResult = true, apiOk = () => true, disk = {} } = {}) {
+  const clockRef = { now: 0 }
+  const redis = createFakeRedis(clockRef)
   const sent = []
-  let clock = 0
   const sender = {
     async send(msg) {
       sent.push(msg)
@@ -69,13 +92,20 @@ function setup({ cfg = {}, sendResult = true } = {}) {
     },
   }
   const log = { info() {}, warn() {}, error() {}, debug() {} }
-  const make = () => new Alerter({ redis, streamRedis: null, sender, cfg: baseCfg(cfg), log, now: () => clock })
+  const fetchImpl = async () => ({ ok: apiOk() })
+  const statfs = async (path) => {
+    if (!disk[path]) throw new Error("ENOENT")
+    return disk[path]
+  }
+  const make = () => new Alerter({
+    redis, streamRedis: null, sender, cfg: baseCfg(cfg), log, now: () => clockRef.now, fetchImpl, statfs,
+  })
   return {
     redis,
     sent,
     alerter: make(),
     restart: make,
-    at: (ms) => { clock = ms },
+    at: (ms) => { clockRef.now = ms },
   }
 }
 
@@ -268,6 +298,140 @@ test("instance name and dashboard link frame every message", async () => {
   at(0); await alerter.tick()
   assert.match(sent[0].text, /^\[local\] 🔴/)
   assert.match(sent[0].text, /<http:\/\/localhost:8080\|Open dashboard>$/)
+})
+
+// ── System alerts ───────────────────────────────────────────────────────
+
+test("API down alerts after the grace period and recovers when /health answers", async () => {
+  let ok = false
+  const { sent, alerter, at } = setup({ cfg: { apiHealthUrl: "http://api:3000/health" }, apiOk: () => ok })
+  at(0); await alerter.tick()
+  at(30_000); await alerter.tick()
+  assert.equal(sent.length, 0)
+  at(MIN); await alerter.tick()
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].text, /🔴 \*API\* is not responding for 1 min/)
+  at(2 * MIN); await alerter.tick()
+  assert.equal(sent.length, 1, "no repeat")
+  ok = true
+  at(5 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*API\* is responding again \(was down 5 min\)/)
+})
+
+test("Redis down: alerts, skips client checks meanwhile, and recovers", async () => {
+  const { redis, sent, alerter, at } = setup()
+  redis.watch("KWC")
+  redis.setState("KWC", "LOGGED_OUT")
+  redis.sys.up = false
+  at(0); await alerter.tick()
+  at(MIN); await alerter.tick()
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].text, /🔴 \*Redis\* is unreachable for 1 min/)
+
+  redis.sys.up = true
+  at(2 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*Redis\* is reachable again/)
+  assert.match(sent[2].text, /🔴 \*KWC\* logged out/, "client checks resume once Redis is back")
+})
+
+test("worker heartbeat: startup grace, stale beat alerts, fresh beat recovers", async () => {
+  const { redis, sent, alerter, at } = setup()
+  redis.sys.heartbeat = null
+  at(0); await alerter.tick()
+  at(MIN); await alerter.tick()
+  assert.equal(sent.length, 0, "no beat yet, still inside the startup grace")
+  at(3 * MIN); await alerter.tick()
+  assert.match(sent[0].text, /🔴 \*Worker\* has not reported since the alerter started/)
+
+  redis.sys.heartbeat = "fresh"
+  at(4 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*Worker\* is reporting again/)
+
+  redis.sys.heartbeat = 4 * MIN
+  at(7 * MIN); await alerter.tick()
+  assert.match(sent[2].text, /🔴 \*Worker\* has stopped reporting — last sign of life 3 min ago/)
+})
+
+test("a restarted alerter keeps an open system alert instead of faking a recovery", async () => {
+  const { redis, sent, alerter, restart, at } = setup()
+  redis.sys.heartbeat = 0
+  at(3 * MIN); await alerter.tick()
+  assert.equal(sent.length, 1)
+
+  const fresh = restart()
+  await fresh.loadSystemOpen()
+  at(4 * MIN); await fresh.tick()
+  assert.equal(sent.length, 1, "heartbeat still stale: neither repeated nor recovered")
+  assert.ok(redis.open()["__system__|worker_down"])
+})
+
+test("Redis memory alerts at the threshold and clears below it with a margin", async () => {
+  const { redis, sent, alerter, at } = setup()
+  redis.sys.usedMemory = 85
+  at(0); await alerter.tick()
+  assert.match(sent[0].text, /⚠️ \*Redis memory\* at 85%/)
+  redis.sys.usedMemory = 78
+  at(MIN); await alerter.tick()
+  assert.equal(sent.length, 1, "inside the margin")
+  redis.sys.usedMemory = 60
+  at(2 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*Redis memory\* back to a safe level/)
+})
+
+test("disk usage alerts per path and clears when space is freed", async () => {
+  const disk = { "/mnt/logs": { bsize: 1024, blocks: 1000, bavail: 50 } }
+  const { sent, alerter, at } = setup({ cfg: { diskPaths: ["/mnt/logs", "/mnt/missing"] }, disk })
+  at(0); await alerter.tick()
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].text, /⚠️ \*Disk\* at 95% for \/mnt\/logs \(50 KB free\)/)
+  disk["/mnt/logs"] = { bsize: 1024, blocks: 1000, bavail: 500 }
+  at(MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*Disk\* usage back to a safe level for \/mnt\/logs/)
+})
+
+test("folders on the same disk produce one alert, and old per-folder alerts are dropped quietly", async () => {
+  const full = { bsize: 1024, blocks: 1000, bavail: 20 }
+  const disk = { "/mnt/sessions": full, "/mnt/logs": full }
+  const { redis, sent, alerter, restart, at } = setup({ cfg: { diskPaths: ["/mnt/sessions", "/mnt/logs"] }, disk })
+
+  // Simulate an alert left by the older one-alert-per-folder behaviour.
+  await redis.hset("wa:alerts:open", "__system__|disk_full:/mnt/logs", JSON.stringify({
+    system: true, clientId: "__system__", kind: "disk_full:/mnt/logs", reason: "disk_full", path: "/mnt/logs", since: 0,
+  }))
+  const fresh = restart()
+  await fresh.loadSystemOpen()
+
+  at(0); await fresh.tick()
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].text, /⚠️ \*Disk\* at 98% for \/mnt\/sessions, \/mnt\/logs/)
+  assert.deepEqual(Object.keys(redis.open()), ["__system__|disk_full:/mnt/sessions,/mnt/logs"])
+  assert.ok(alerter)
+})
+
+test("dead-letter growth is reported once per cooldown, existing entries are not", async () => {
+  const { redis, sent, alerter, at } = setup()
+  redis.sys.dlqLength = 4
+  at(0); await alerter.tick()
+  assert.equal(sent.length, 0, "existing entries at first run are just recorded")
+  redis.sys.dlqLength = 6
+  at(MIN); await alerter.tick()
+  assert.match(sent[0].text, /⚠️ 2 broken event\(s\) moved to the dead-letter stream `wa:events:dlq` \(6 in total\)/)
+  redis.sys.dlqLength = 7
+  at(2 * MIN); await alerter.tick()
+  assert.equal(sent.length, 1, "cooling down")
+  at(32 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /⚠️ 1 broken event/)
+})
+
+test("system alerts appear in the daily message and are not closed by watch-list cleanup", async () => {
+  const { redis, sent, alerter, at } = setup({ cfg: { dailyOkTime: "10:00" } })
+  redis.sys.heartbeat = 0
+  at(DAY_10AM_IST); await alerter.tick()
+  const texts = sent.map((m) => m.text).join("\n")
+  assert.match(texts, /🔴 \*Worker\* has stopped reporting/)
+  assert.match(texts, /Daily check — alerter running, watching 0 client\(s\)\. Open alerts: 1/)
+  at(DAY_10AM_IST + MIN); await alerter.tick()
+  assert.ok(redis.open()["__system__|worker_down"], "still open")
 })
 
 test("started message lists watched clients", async () => {

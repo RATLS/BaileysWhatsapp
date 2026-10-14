@@ -44,6 +44,21 @@ function loadConfig() {
     minSendIntervalMs: positiveNumber("ALERT_MIN_SEND_INTERVAL_MS", 1100),
     // Logout events older than this (e.g. replayed after downtime) are ignored.
     eventMaxAgeMs: positiveNumber("ALERT_EVENT_MAX_AGE_MS", 5 * 60_000),
+
+    // ── System checks (always on, not tied to the watch list) ──
+    apiHealthUrl: (process.env.ALERT_API_HEALTH_URL || "http://api:3000/health").trim(),
+    // API / Redis must be failing this long before alerting (ignores restarts/blips).
+    systemGraceMs: positiveNumber("ALERT_SYSTEM_GRACE_MS", 60_000),
+    // Worker heartbeat (wa:health:worker) older than this = worker down/frozen.
+    workerStaleMs: positiveNumber("ALERT_WORKER_STALE_MS", 2 * 60_000),
+    probeTimeoutMs: positiveNumber("ALERT_PROBE_TIMEOUT_MS", 5_000),
+    redisMemoryPct: positiveNumber("ALERT_REDIS_MEMORY_PCT", 80),
+    diskPct: positiveNumber("ALERT_DISK_PCT", 85),
+    // Comma-separated paths to measure (read-only mounts). Empty = no disk check.
+    diskPaths: (process.env.ALERT_DISK_PATHS || "").split(",").map((p) => p.trim()).filter(Boolean),
+    dlqStream: process.env.WA_EVENTS_DLQ_STREAM || "wa:events:dlq",
+    // At most one "broken events" notice per this period.
+    dlqCooldownMs: positiveNumber("ALERT_DLQ_COOLDOWN_MS", 30 * 60_000),
   }
 }
 

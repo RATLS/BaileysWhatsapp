@@ -1,7 +1,24 @@
+const fs = require("fs")
 const keys = require("./keys")
 const { KINDS, evaluateConnection, evaluateQueue, evaluateFailures, isWorse } = require("./rules")
+const {
+  evaluateDown,
+  evaluateHeartbeat,
+  evaluatePercent,
+  parseRedisMemory,
+  diskUsage,
+  evaluateDlq,
+} = require("./systemRules")
 const messages = require("./messages")
 const { zonedDateTime } = require("./time")
+
+function withTimeout(promise, ms) {
+  let timer
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms) }),
+  ]).finally(() => clearTimeout(timer))
+}
 
 const openField = (clientId, kind) => `${clientId}|${kind}`
 const threadKeyFor = (clientId, kind, at) => `${clientId}-${kind}-${at}`
@@ -21,7 +38,17 @@ function safeJson(raw) {
  * wa:alerts:dailyOkDate (plus its own consumer group on the event stream).
  */
 class Alerter {
-  constructor({ redis, streamRedis, sender, cfg, log, now = Date.now, consumerName = "alerter-1" }) {
+  constructor({
+    redis,
+    streamRedis,
+    sender,
+    cfg,
+    log,
+    now = Date.now,
+    consumerName = "alerter-1",
+    fetchImpl = globalThis.fetch,
+    statfs = (path) => fs.promises.statfs(path),
+  }) {
     this.redis = redis
     this.streamRedis = streamRedis
     this.sender = sender
@@ -29,10 +56,17 @@ class Alerter {
     this.log = log
     this.now = now
     this.consumerName = consumerName
+    this.fetchImpl = fetchImpl
+    this.statfs = statfs
     this.tracks = new Map() // clientId -> { conn, queue }
+    this.systemTracks = {} // { redis, api } -> { failingSince }
+    this.systemOpen = new Map() // kind -> open system alert
+    this.dlqNoticeAt = null
+    this.startedAt = now()
     this.ticking = false
     this.stopped = false
     this.timer = null
+    this.lastStreamWarnAt = 0
   }
 
   ctx(now) {
@@ -41,14 +75,40 @@ class Alerter {
 
   // ── Persistence of open alerts (survives alerter restarts) ────────────
 
+  // Client alerts only; system alerts live in this.systemOpen.
   async loadOpen() {
     const raw = (await this.redis.hgetall(keys.OPEN_KEY)) || {}
     const open = new Map()
     for (const [field, value] of Object.entries(raw)) {
       const alert = safeJson(value)
-      if (alert && alert.clientId && alert.kind) open.set(field, alert)
+      if (alert && alert.clientId && alert.kind && alert.clientId !== keys.SYSTEM_ID) open.set(field, alert)
     }
     return open
+  }
+
+  async loadSystemOpen() {
+    const raw = (await this.redis.hgetall(keys.OPEN_KEY)) || {}
+    for (const value of Object.values(raw)) {
+      const alert = safeJson(value)
+      if (alert && alert.clientId === keys.SYSTEM_ID && alert.kind) this.systemOpen.set(alert.kind, alert)
+    }
+  }
+
+  // Best effort: Redis itself may be the thing that is down.
+  async persistSystem(alert) {
+    try {
+      await this.redis.hset(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind), JSON.stringify(alert))
+    } catch {}
+  }
+
+  async unpersistSystem(alert) {
+    try {
+      await this.redis.hdel(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind))
+    } catch {}
+  }
+
+  allOpenAlerts(clientOpen) {
+    return [...this.systemOpen.values(), ...clientOpen.values()]
   }
 
   async saveOpen(alert) {
@@ -65,12 +125,167 @@ class Alerter {
     if (this.ticking) return
     this.ticking = true
     try {
-      await this.runChecks(this.now())
+      const now = this.now()
+      const redisOk = await this.runSystemChecks(now)
+      // Client checks need Redis; while it's down only the Redis alert applies.
+      if (redisOk) await this.runChecks(now)
     } catch (err) {
       this.log.error(`Alert check failed: ${err && err.message ? err.message : err}`)
     } finally {
       this.ticking = false
     }
+  }
+
+  // ── System checks (always on) ─────────────────────────────────────────
+
+  async probeRedis() {
+    try {
+      await withTimeout(this.redis.ping(), this.cfg.probeTimeoutMs)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async probeApi() {
+    if (!this.cfg.apiHealthUrl) return true
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.cfg.probeTimeoutMs)
+    try {
+      const res = await this.fetchImpl(this.cfg.apiHealthUrl, { signal: controller.signal })
+      return Boolean(res && res.ok)
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Opens/closes one system alert. An alert only closes on positive proof
+   * that things are fine (healthy === true), never just because a check
+   * couldn't run, so restarts or partial outages can't fake a recovery.
+   */
+  async setSystemAlert(kind, problem, healthy, now) {
+    const open = this.systemOpen.get(kind)
+    const ctx = this.ctx(now)
+    if (problem && !open) {
+      const alert = {
+        system: true,
+        clientId: keys.SYSTEM_ID,
+        kind,
+        reason: kind.split(":")[0],
+        openedAt: now,
+        ...problem,
+        since: problem.since ?? now,
+      }
+      if (await this.sender.send({ text: messages.withFrame(messages.problemLine(alert, ctx), this.cfg) })) {
+        this.systemOpen.set(kind, alert)
+        await this.persistSystem(alert)
+      }
+    } else if (!problem && open && healthy) {
+      await this.sender.send({ text: messages.withFrame(messages.recoveryLine(open, ctx), this.cfg) })
+      this.systemOpen.delete(kind)
+      await this.unpersistSystem(open)
+    }
+  }
+
+  // Seed the failure clock from an open alert (e.g. after an alerter restart).
+  downTrack(name, kind) {
+    const open = this.systemOpen.get(kind)
+    return this.systemTracks[name] || (open ? { failingSince: open.since } : undefined)
+  }
+
+  async runSystemChecks(now) {
+    const { cfg } = this
+
+    const redisOk = await this.probeRedis()
+    const redisState = evaluateDown(this.downTrack("redis", "redis_down"), redisOk, now, cfg.systemGraceMs)
+    this.systemTracks.redis = redisState.track
+    await this.setSystemAlert("redis_down", redisState.problem, redisOk, now)
+
+    const apiOk = await this.probeApi()
+    const apiState = evaluateDown(this.downTrack("api", "api_down"), apiOk, now, cfg.systemGraceMs)
+    this.systemTracks.api = apiState.track
+    await this.setSystemAlert("api_down", apiState.problem, apiOk, now)
+
+    await this.checkDisks(now)
+
+    if (!redisOk) return false
+
+    await this.checkWorker(now).catch((err) => this.log.warn(`Worker check failed: ${err.message}`))
+    await this.checkRedisMemory(now).catch((err) => this.log.warn(`Redis memory check failed: ${err.message}`))
+    await this.checkDlq(now).catch((err) => this.log.warn(`Dead-letter check failed: ${err.message}`))
+    return true
+  }
+
+  // Folders on the same disk report the same totals; alert once per disk,
+  // listing all its folders, e.g. "disk_full:/mnt/sessions,/mnt/logs".
+  async checkDisks(now) {
+    const { cfg } = this
+    if (!cfg.diskPaths.length) return
+    const groups = new Map() // total bytes -> { paths, usage }
+    let allMeasured = true
+    for (const path of cfg.diskPaths) {
+      const usage = diskUsage(await this.statfs(path).catch(() => null))
+      if (!usage) {
+        allMeasured = false
+        continue
+      }
+      const group = groups.get(usage.total) || { paths: [], usage }
+      group.paths.push(path)
+      groups.set(usage.total, group)
+    }
+
+    const checked = new Set()
+    for (const { paths, usage } of groups.values()) {
+      const kind = `disk_full:${paths.join(",")}`
+      checked.add(kind)
+      const breached = evaluatePercent(usage.pct, cfg.diskPct, this.systemOpen.has(kind))
+      await this.setSystemAlert(kind, breached ? { path: paths.join(", "), pct: usage.pct, free: usage.free } : null, !breached, now)
+    }
+
+    // Disk alerts from an older folder layout/grouping: drop quietly once every
+    // configured folder could be measured (so a read error can't hide a real one).
+    if (!allMeasured) return
+    for (const [kind, alert] of this.systemOpen) {
+      if (alert.reason === "disk_full" && !checked.has(kind)) {
+        this.systemOpen.delete(kind)
+        await this.unpersistSystem(alert)
+        this.log.info(`Dropped stale disk alert ${kind}`)
+      }
+    }
+  }
+
+  async checkWorker(now) {
+    const raw = await this.redis.get(keys.WORKER_HEARTBEAT_KEY)
+    const lastBeat = raw === null || raw === undefined ? null : Number(raw)
+    const problem = evaluateHeartbeat(lastBeat, now, this.cfg.workerStaleMs, this.startedAt)
+    const healthy = Number.isFinite(lastBeat) && now - lastBeat <= this.cfg.workerStaleMs
+    await this.setSystemAlert("worker_down", problem, healthy, now)
+  }
+
+  async checkRedisMemory(now) {
+    const mem = parseRedisMemory(await this.redis.info("memory"))
+    if (mem.pct === null) return // no maxmemory configured: nothing to compare against
+    const breached = evaluatePercent(mem.pct, this.cfg.redisMemoryPct, this.systemOpen.has("redis_memory"))
+    await this.setSystemAlert("redis_memory", breached ? { pct: mem.pct, used: mem.used, max: mem.max } : null, !breached, now)
+  }
+
+  // Broken events are a one-off notice (no open/recover), rate-limited.
+  async checkDlq(now) {
+    const [length, seenRaw] = await Promise.all([
+      this.redis.xlen(this.cfg.dlqStream),
+      this.redis.get(keys.DLQ_SEEN_KEY),
+    ])
+    const seen = seenRaw === null || seenRaw === undefined ? null : Number(seenRaw)
+    const result = evaluateDlq(seen, length, now, this.dlqNoticeAt, this.cfg.dlqCooldownMs)
+    if (result.notify) {
+      const text = messages.withFrame(messages.dlqLine({ newCount: result.newCount, length, stream: this.cfg.dlqStream }), this.cfg)
+      if (!(await this.sender.send({ text }))) return // retry next check
+      this.dlqNoticeAt = now
+    }
+    if (result.seen !== seen) await this.redis.set(keys.DLQ_SEEN_KEY, String(result.seen))
   }
 
   async runChecks(now) {
@@ -194,14 +409,22 @@ class Alerter {
     if (time < this.cfg.dailyOkTime) return
     if ((await this.redis.get(keys.DAILY_OK_KEY)) === date) return
 
-    const openAlerts = [...(await this.loadOpen()).values()]
+    const openAlerts = this.allOpenAlerts(await this.loadOpen())
     const text = messages.dailyOkMessage({ watched: [...watched], openAlerts }, this.ctx(now), this.cfg)
     if (await this.sender.send({ text })) await this.redis.set(keys.DAILY_OK_KEY, date)
   }
 
   async sendStarted() {
-    const [watched, open] = await Promise.all([this.redis.smembers(keys.WATCHED_KEY), this.loadOpen()])
-    await this.sender.send({ text: messages.startedMessage({ watched: (watched || []).sort(), openCount: open.size }, this.cfg) })
+    let watched = []
+    let openCount = this.systemOpen.size
+    try {
+      const [list, open] = await Promise.all([this.redis.smembers(keys.WATCHED_KEY), this.loadOpen()])
+      watched = (list || []).sort()
+      openCount += open.size
+    } catch (err) {
+      this.log.warn(`Could not read watch list at start: ${err.message}`)
+    }
+    await this.sender.send({ text: messages.startedMessage({ watched, openCount }, this.cfg) })
   }
 
   // ── Event stream (only used to catch logouts, which are short-lived) ──
@@ -257,7 +480,11 @@ class Alerter {
       } catch (err) {
         if (this.stopped) break
         const message = err && err.message ? err.message : String(err)
-        this.log.warn(`Event stream read failed: ${message}`)
+        // While Redis is down this fails every 2 s; log at most once a minute.
+        if (Date.now() - this.lastStreamWarnAt > 60_000) {
+          this.log.warn(`Event stream read failed: ${message}`)
+          this.lastStreamWarnAt = Date.now()
+        }
         if (message.includes("NOGROUP")) await this.ensureGroup().catch(() => {})
         await new Promise((r) => setTimeout(r, 2000))
       }
@@ -266,8 +493,12 @@ class Alerter {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
+  // Must not fail when Redis is down at start, or the "Redis down" alert
+  // could never be sent; anything that needs Redis is retried later.
   async start() {
-    await this.ensureGroup()
+    this.startedAt = this.now()
+    await this.ensureGroup().catch((err) => this.log.warn(`Consumer group not ready yet: ${err.message}`))
+    await this.loadSystemOpen().catch(() => {})
     await this.sendStarted()
     await this.tick()
     this.timer = setInterval(() => this.tick(), this.cfg.tickMs)

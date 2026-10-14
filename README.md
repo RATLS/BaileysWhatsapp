@@ -223,7 +223,22 @@ Configuration (`.env`, see `.env.example`):
 - `ALERT_INSTANCE_NAME` (e.g. `local` → every message starts with `[local]`), `ALERT_DASHBOARD_URL`
 - thresholds above, `ALERT_TIMEZONE`, `ALERT_DAILY_OK_TIME`
 
-Not covered yet (planned step 2): system alerts (API/worker/Redis down, container restarts, disk, DLQ).
+System alerts (always on, not tied to the watch list; open → "✅" recovery like client alerts):
+
+| Problem | How it is detected | Alert after |
+|---|---|---|
+| API down | `GET ALERT_API_HEALTH_URL` (default `http://api:3000/health`) fails | 1 min (`ALERT_SYSTEM_GRACE_MS`) |
+| Redis down | `PING` fails / times out (client checks pause meanwhile) | 1 min |
+| worker down or frozen | `wa:health:worker` (written by the worker every 30 s, `EX 120`) older than 2 min or missing | 2 min (`ALERT_WORKER_STALE_MS`), with the same grace after alerter start |
+| Redis memory high | `INFO memory` used/maxmemory | ≥ 80% (`ALERT_REDIS_MEMORY_PCT`), clears below 75% |
+| disk nearly full | `statfs` on read-only mounts `/mnt/sessions`, `/mnt/logs` (`ALERT_DISK_PATHS`); folders on one disk = one alert | ≥ 85% (`ALERT_DISK_PCT`), clears below 80% |
+| broken events | `XLEN wa:events:dlq` grew since last seen (`wa:alerts:dlqSeen`) | one notice, at most every 30 min |
+
+A system alert only closes on positive proof (the API answering, a fresh heartbeat, a lower reading), so an
+alerter restart or a partial outage can never fake a recovery. The alerter starts and alerts even if Redis is down.
+It has no Docker socket access, so container restart counts and the dashboard container are not monitored;
+a crash-looping API or worker still shows up through its failing health check / heartbeat.
+
 Known limit: if the whole server or the alerter is down, nothing can alert — the missing daily message is the signal.
 
 ## 5) Redis Data Model
@@ -282,6 +297,16 @@ These keys are the runtime contracts the rest of the code assumes:
 
 - `wa:alerts:dailyOkDate`
   Redis string, date (in `ALERT_TIMEZONE`) of the last daily "all OK" message. Owned by the alerter.
+
+- `wa:alerts:dlqSeen`
+  Redis string, `wa:events:dlq` length the alerter last reported on. Owned by the alerter.
+
+- `wa:health:worker`
+  Redis string, Unix ms of the worker's last 30 s tick, `EX 120`. Written by the worker (`worker/clientState.js`),
+  read by the alerter. Missing or old = worker down or frozen.
+
+- `wa:alerts:open` also holds system alerts under fields `__system__|<kind>` (`api_down`, `redis_down`,
+  `worker_down`, `redis_memory`, `disk_full:<paths>`); `__system__` can't clash with a real clientId.
 
 - consumer group `alerters` on `wa:events:stream` — the alerter's own group, independent of `api-consumers`.
 
@@ -936,6 +961,7 @@ Current compose environment highlights:
 
 - alerter:
   - `GOOGLE_CHAT_WEBHOOK_URL` (secret, from `.env`; empty = dry run), `ALERT_*` settings (see 4.5)
+  - read-only mounts `./sessions:/mnt/sessions:ro`, `./logs:/mnt/logs:ro` (disk-space check only)
   - memory limit 96 MB (uses ~20 MB), `restart: unless-stopped`
 
 ## 16) TLS / Proxy Setup
@@ -999,6 +1025,10 @@ What is covered today:
   ignored, thread updates on worsening, no duplicate/false recovery after restart, batching, retry when Google
   Chat rejects, stop/unwatch closing, queue-stuck and send-failure alerts, daily OK once per day, message framing;
   Google Chat sender threading, retries/backoff, no URL in logs, rate spacing, dry run
+- alerter system checks: API/Redis down after grace and recovery, client checks paused while Redis is down,
+  worker heartbeat (startup grace, stale, missing, recovery), no false recovery after restart, Redis memory and
+  disk thresholds with hysteresis, one alert per disk, stale disk alerts dropped, dead-letter growth notices
+  with cooldown, system alerts in the daily message
 
 How to run tests:
 
