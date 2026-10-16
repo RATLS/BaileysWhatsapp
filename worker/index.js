@@ -87,12 +87,16 @@ const fs = require("fs")
 const { startCommandListener } = require("./commandListener")
 const { rehydrateClients } = require("./startupRehydrate")
 const { reassertClientStates } = require("./socketManager")
+const { writeHeartbeat } = require("./clientState")
 const { info, error } = require("./logger")
 
 const HEARTBEAT_FILE = "/tmp/worker-heartbeat"
 
+// Two liveness signals: a file for the Docker HEALTHCHECK and a Redis key
+// (wa:health:worker) for the alerter. Neither may ever throw.
 function beat() {
   try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())) } catch {}
+  writeHeartbeat().catch(() => {})
 }
 
 async function start() {

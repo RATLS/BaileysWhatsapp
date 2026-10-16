@@ -1,6 +1,7 @@
 const { info, error, LOG_LEVEL } = require("./logger")
 const fastify = require("fastify")({ logger: { level: LOG_LEVEL } })
 const redis = require("./redis")
+const { createEnvTagger } = require("./envTagger")
 
 const start = async () => {
   try {
@@ -9,10 +10,16 @@ const start = async () => {
       origin: true
     })
 
+    const envTagger = createEnvTagger(redis)
+    fastify.decorate("envTagger", envTagger)
+    envTagger.registerHook(fastify)
+
     fastify.register(require("./routes/ws"))
     fastify.register(require("./routes/clients"))
     fastify.register(require("./routes/messages"))
     fastify.register(require("./routes/debug-routes"))
+    fastify.register(require("./routes/clientEnv"))
+    fastify.register(require("./routes/alerts"))
 
     const { startConsumer } = require("./streamConsumer")
     startConsumer().catch(err => {

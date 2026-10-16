@@ -3,9 +3,11 @@ const fs = require("fs")
 const path = require("path")
 const readline = require("readline")
 const { broadcast } = require("../wsHub")
+const { warn } = require("../logger")
 
 const MSGLOGS_DIR = "/logs/msglogs"
 const STATE_KEY = "wa:clients:state"
+const ALERT_WATCHED_KEY = "wa:alerts:watched"
 const SEND_DELAY_CONFIG_KEY = "wa:config:sendDelay"
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{1,120}$/
 const DEFAULT_SEND_DELAY_MIN_MS = 3000
@@ -172,6 +174,18 @@ module.exports = async function (fastify) {
       JSON.stringify({ type: "DELETE_CLIENT", clientId })
     )
 
+    try {
+      await fastify.envTagger.forget(clientId)
+    } catch (err) {
+      warn(`⚠️ Failed to clear env label for ${clientId}:`, err && err.message ? err.message : err)
+    }
+
+    try {
+      await redis.srem(ALERT_WATCHED_KEY, clientId)
+    } catch (err) {
+      warn(`⚠️ Failed to remove ${clientId} from the alert watch list:`, err && err.message ? err.message : err)
+    }
+
     return { ok: true, clientId }
   })
 
@@ -181,15 +195,22 @@ module.exports = async function (fastify) {
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200)
       : 50
+    // Offset counts from the head (newest job). The worker sends from the
+    // tail, so a job's send position is `total - index`.
+    const requestedOffset = Number(req.query && req.query.offset)
+    const offset = Number.isFinite(requestedOffset)
+      ? Math.max(Math.floor(requestedOffset), 0)
+      : 0
     const queueKey = `wa:pending:${clientId}`
     const total = await redis.llen(queueKey)
-    const rows = await redis.lrange(queueKey, 0, limit - 1)
-    const messages = rows.map((raw, idx) => parseQueueEntry(raw, idx))
+    const rows = await redis.lrange(queueKey, offset, offset + limit - 1)
+    const messages = rows.map((raw, idx) => parseQueueEntry(raw, offset + idx))
     return {
       clientId,
       total,
       returned: messages.length,
       limit,
+      offset,
       messages
     }
   })
@@ -256,25 +277,27 @@ module.exports = async function (fastify) {
     const toMs = to ? new Date(to + "T23:59:59.999Z").getTime() : Infinity
 
     const filePath = path.join(MSGLOGS_DIR, `${clientId}.jsonl`)
+    const empty = { clientId, total: 0, returned: 0, entries: [] }
 
-    let fileStream
+    // A client that has never sent anything has no file yet. createReadStream
+    // doesn't throw for that — the error arrives asynchronously — so check first.
     try {
-      fileStream = fs.createReadStream(filePath, { encoding: "utf8" })
+      await fs.promises.access(filePath, fs.constants.R_OK)
     } catch (err) {
-      if (err.code === "ENOENT") {
-        return { clientId, total: 0, returned: 0, entries: [] }
-      }
+      if (err.code === "ENOENT") return empty
       throw err
     }
 
+    const fileStream = fs.createReadStream(filePath, { encoding: "utf8" })
     const entries = []
     const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity })
 
+    // The file can still disappear between the check and the read (e.g. a
+    // concurrent "Delete File"); treat that as empty too.
+    const onStreamError = (err, resolve, reject) => (err.code === "ENOENT" ? resolve() : reject(err))
+
     await new Promise((resolve, reject) => {
-      fileStream.on("error", (err) => {
-        if (err.code === "ENOENT") resolve()
-        else reject(err)
-      })
+      fileStream.on("error", (err) => onStreamError(err, resolve, reject))
       rl.on("line", (line) => {
         if (!line.trim()) return
         try {
@@ -287,7 +310,7 @@ module.exports = async function (fastify) {
         }
       })
       rl.on("close", resolve)
-      rl.on("error", reject)
+      rl.on("error", (err) => onStreamError(err, resolve, reject))
     })
 
     entries.sort((a, b) => b.sentAt - a.sentAt)

@@ -62,6 +62,8 @@ services:
       LOG_LEVEL: "warn"
       API_LOG_LEVEL: "warn"
       REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
+      # Frontend origin -> environment, used to label clients (wa:clients:env).
+      ENV_ORIGINS: "${ENV_ORIGINS:-https://development.reachandteach.in=dev,https://testing.reachandteach.in=test,https://master.reachandteach.in=uat,https://institute.reachandteach.in=prod}"
     volumes:
       - ./logs:/logs
     restart: unless-stopped
@@ -69,6 +71,42 @@ services:
       resources:
         limits:
           memory: 100M
+
+  alerter:
+    build: ./alerter
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"
+      # Secret, set in .env. Empty = dry run (messages are only logged).
+      GOOGLE_CHAT_WEBHOOK_URL: "${GOOGLE_CHAT_WEBHOOK_URL:-}"
+      ALERT_INSTANCE_NAME: "${ALERT_INSTANCE_NAME:-}"
+      ALERT_DASHBOARD_URL: "${ALERT_DASHBOARD_URL:-}"
+      ALERT_TIMEZONE: "${ALERT_TIMEZONE:-Asia/Kolkata}"
+      ALERT_DAILY_OK_TIME: "${ALERT_DAILY_OK_TIME:-10:00}"
+      ALERT_DISCONNECT_GRACE_MS: "${ALERT_DISCONNECT_GRACE_MS:-180000}"
+      ALERT_QR_GRACE_MS: "${ALERT_QR_GRACE_MS:-600000}"
+      ALERT_QUEUE_STUCK_MS: "${ALERT_QUEUE_STUCK_MS:-600000}"
+      ALERT_FAILURE_THRESHOLD: "${ALERT_FAILURE_THRESHOLD:-5}"
+      # System checks
+      ALERT_API_HEALTH_URL: "${ALERT_API_HEALTH_URL:-http://api:3000/health}"
+      ALERT_SYSTEM_GRACE_MS: "${ALERT_SYSTEM_GRACE_MS:-60000}"
+      ALERT_WORKER_STALE_MS: "${ALERT_WORKER_STALE_MS:-120000}"
+      ALERT_REDIS_MEMORY_PCT: "${ALERT_REDIS_MEMORY_PCT:-80}"
+      ALERT_DISK_PCT: "${ALERT_DISK_PCT:-85}"
+      ALERT_DISK_PATHS: "/mnt/sessions,/mnt/logs"
+      LOG_LEVEL: "info"
+    volumes:
+      # Read-only, only used to measure free disk space.
+      - ./sessions:/mnt/sessions:ro
+      - ./logs:/mnt/logs:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+          cpus: '0.25'
 
   proxy:
     image: nginx:1.27-alpine

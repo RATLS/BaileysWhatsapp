@@ -66,6 +66,18 @@ module.exports = async function (fastify) {
     }
   })
 
+  // Queue length for every known client in one call (dashboard row badges).
+  fastify.get("/debug/queue-counts", async () => {
+    const clientIds = Object.keys(await redis.hgetall("wa:clients:state") || {})
+    const lengths = await Promise.all(clientIds.map((id) => redis.llen(`wa:pending:${id}`)))
+    const counts = Object.fromEntries(clientIds.map((id, i) => [id, lengths[i]]))
+    return {
+      counts,
+      total: lengths.reduce((sum, n) => sum + n, 0),
+      timestamp: new Date().toISOString()
+    }
+  })
+
   // Debug endpoint to check pending messages
   fastify.get("/debug/pending/:clientId", async (req, res) => {
     const { clientId } = req.params

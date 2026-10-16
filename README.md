@@ -4,6 +4,8 @@ Redis-orchestrated WhatsApp backend built around Baileys, Fastify, and a small o
 
 This README is intended to be enough to understand the codebase before making changes. It documents the actual runtime model, data contracts, operational defaults, and the files that own each behavior.
 
+For a beginner-friendly visual walkthrough, open [`docs/system-architecture.html`](docs/system-architecture.html) in a browser. It introduces Redis, Baileys, and Docker in plain language, then lets you explore the services, message flows, client lifecycle, Redis keys, and API routes.
+
 ## 1) What This Repo Does
 
 The system manages multiple WhatsApp clients identified by `clientId`.
@@ -24,6 +26,7 @@ The architecture is deliberately split into control-plane and execution-plane se
 - `worker`: owns Baileys sockets and drains outbound queues
 - `redis`: shared system state, command bus, queue store, QR cache, and event stream
 - `dashboard`: operational UI plus authenticated log viewer
+- `alerter`: posts Google Chat alerts when watched clients have problems (see 4.5)
 - `proxy`: Nginx TLS terminator in front of the API
 
 ## 2) Mental Model
@@ -121,6 +124,8 @@ Primary files:
 - `api/routes/messages.js`
 - `api/routes/ws.js`
 - `api/routes/debug-routes.js`
+- `api/routes/clientEnv.js`
+- `api/envTagger.js`
 - `api/streamConsumer.js`
 - `api/wsHub.js`
 
@@ -131,6 +136,7 @@ Responsibilities:
 - read QR/state snapshots from Redis for newly registered sockets
 - consume worker events from `wa:events:stream`
 - broadcast valid events to interested WebSocket clients
+- label each client with the environment (dev/test/uat/prod) that uses it (see 13.7)
 
 Important implementation details:
 
@@ -143,7 +149,10 @@ Important implementation details:
 Primary files:
 
 - `dashboard/server/index.js`
-- `dashboard/src/App.jsx`
+- `dashboard/src/App.jsx` (coordinator: refresh loop, actions, filters)
+- `dashboard/src/config.js` (all tunables; `VITE_*` overrides)
+- `dashboard/src/api.js` (API client that surfaces server error text)
+- `dashboard/src/components/*.jsx`
 
 Responsibilities:
 
@@ -170,6 +179,78 @@ Purpose:
 - forwards traffic to the API service
 
 The API itself stays on internal Docker port `3000`; external HTTPS/WSS should go through Nginx on `443`.
+
+### 4.5 `alerter`
+
+Primary files:
+
+- `alerter/index.js` (wiring), `alerter/alerter.js` (checks + delivery), `alerter/rules.js` (pure decisions),
+  `alerter/messages.js` (wording), `alerter/googleChat.js` (webhook sender), `alerter/config.js` (env settings)
+
+Purpose: tell the team in Google Chat when a **watched** client has a problem, and again when it recovers.
+It is a separate container so it keeps working when the API is down. It never writes to keys the worker
+or API own, so queue/delivery behaviour is unaffected.
+
+Which clients: only those in `wa:alerts:watched`, toggled per client in the dashboard (`⋯` → "Watch for alerts").
+
+What it alerts on (defaults, all configurable):
+
+| Problem | Alert after |
+|---|---|
+| disconnected (`DISCONNECTED`, `CONNECTING`, `CREATED`) | 3 min (`ALERT_DISCONNECT_GRACE_MS`) |
+| logged out (needs QR rescan) | immediately |
+| waiting for QR (`QR_REQUIRED`) | 10 min (`ALERT_QR_GRACE_MS`) |
+| queue not shrinking while `CONNECTED` | 10 min (`ALERT_QUEUE_STUCK_MS`) |
+| failed sends in the last 10 min | ≥ 5 (`ALERT_FAILURE_THRESHOLD`); closes when the window has none |
+
+How it works:
+
+- every 15 s it reads `wa:clients:state`, queue lengths and recent `wa:msglog` entries for watched clients
+- it also reads `wa:events:stream` through its own consumer group `alerters` (starts at `$`, never replays
+  history), only to catch `LOGGED_OUT`, which the worker replaces with a new QR cycle within seconds
+- one message per problem, in its own Google Chat thread; updates (e.g. disconnected → logged out) and the
+  "✅ back online" message go into the same thread
+- 3+ new problems (or recoveries) in one check are combined into one message (Google Chat allows ~1 msg/s)
+- open alerts are stored in `wa:alerts:open`, so restarts don't repeat or falsely close them; an alert is
+  only recorded once Google Chat accepted it (otherwise it is retried on the next check)
+- stopping, deleting or un-watching a client closes its alert with a note
+- posts "🟢 Alerter started" on every start and a daily "all OK" summary at `ALERT_DAILY_OK_TIME`
+  (default 10:00 `ALERT_TIMEZONE`, `off` disables); if the daily message is missing, the alerter or server is down
+
+Configuration (`.env`, see `.env.example`):
+
+- `GOOGLE_CHAT_WEBHOOK_URL` — **secret**; empty = dry run (messages are only logged, nothing is sent)
+- `ALERT_INSTANCE_NAME` (e.g. `local` → every message starts with `[local]`), `ALERT_DASHBOARD_URL`
+- thresholds above, `ALERT_TIMEZONE`, `ALERT_DAILY_OK_TIME`
+
+System alerts (always on, not tied to the watch list; open → "✅" recovery like client alerts):
+
+| Problem | How it is detected | Alert after |
+|---|---|---|
+| API down | `GET ALERT_API_HEALTH_URL` (default `http://api:3000/health`) fails | 1 min (`ALERT_SYSTEM_GRACE_MS`) |
+| Redis down | `PING` fails / times out (client checks pause meanwhile) | 1 min |
+| worker down or frozen | `wa:health:worker` (written by the worker every 30 s, `EX 120`) older than 2 min or missing | 2 min (`ALERT_WORKER_STALE_MS`), with the same grace after alerter start |
+| Redis memory high | `INFO memory` used/maxmemory | ≥ 80% (`ALERT_REDIS_MEMORY_PCT`), clears below 75% |
+| disk nearly full | `statfs` on read-only mounts `/mnt/sessions`, `/mnt/logs` (`ALERT_DISK_PATHS`); folders on one disk = one alert | ≥ 85% (`ALERT_DISK_PCT`), clears below 80% |
+| broken events | `XLEN wa:events:dlq` grew since last seen (`wa:alerts:dlqSeen`) | one notice, at most every 30 min |
+
+A system alert only closes on positive proof (the API answering, a fresh heartbeat, a lower reading), so an
+alerter restart or a partial outage can never fake a recovery. The alerter starts and alerts even if Redis is down:
+nothing at start-up waits for Redis (reads time out after `ALERT_PROBE_TIMEOUT_MS`, the event-stream reader
+connects in the background), and saving an alert to an unreachable Redis is time-limited so other checks keep running.
+Until the open system alerts from before a restart have been read from Redis, only "Redis down" can open, so a
+restart during a Redis outage doesn't repeat alerts (e.g. disk) that were already open.
+
+Pause handling: a 5 s clock watcher detects when the whole machine was frozen (laptop sleep, VM pause). After such a
+pause, failure clocks restart and new system alerts are held for `ALERT_RESUME_GRACE_MS` (default 60 s) so services
+can report in again; recoveries are still sent. A slow check alone never counts as a pause. If the worker's heartbeat
+key has expired, the message uses the last beat the alerter saw ("last sign of life … ago").
+
+Every message actually delivered to Google Chat is logged as `Google Chat: sent "…"` (text only, never the URL).
+It has no Docker socket access, so container restart counts and the dashboard container are not monitored;
+a crash-looping API or worker still shows up through its failing health check / heartbeat.
+
+Known limit: if the whole server or the alerter is down, nothing can alert — the missing daily message is the signal.
 
 ## 5) Redis Data Model
 
@@ -207,6 +288,38 @@ These keys are the runtime contracts the rest of the code assumes:
   `status` is `"sent"` or `"failed"`. `failReason` is present only on failures.
   Entries older than 7 days are trimmed inline on each write.
   This key is intentionally NOT deleted when a client is deleted — it expires naturally via TTL trimming.
+
+- `wa:clients:env`
+  Redis hash of `clientId -> dev | test | uat | prod`.
+  Set once (`HSETNX`) on the first labelled request for a client; never overwritten automatically.
+  Changed only from the dashboard (`PUT/DELETE /clients/:clientId/env`). Removed on client delete.
+
+- `wa:clients:envMismatch`
+  Redis hash of `clientId -> comma-separated envs` that used the client after it was labelled differently.
+  Warning only; cleared when the env is set manually or the client is deleted.
+
+- `wa:alerts:watched`
+  Redis set of clientIds the alerter watches. Written by the API (`PUT/DELETE /clients/:clientId/alerts/watch`),
+  removed on client delete.
+
+- `wa:alerts:open`
+  Redis hash `clientId|kind -> JSON` of alerts currently open (kind: `connection`, `queue_stuck`, `send_failures`),
+  including the Google Chat thread key. Owned by the alerter.
+
+- `wa:alerts:dailyOkDate`
+  Redis string, date (in `ALERT_TIMEZONE`) of the last daily "all OK" message. Owned by the alerter.
+
+- `wa:alerts:dlqSeen`
+  Redis string, `wa:events:dlq` length the alerter last reported on. Owned by the alerter.
+
+- `wa:health:worker`
+  Redis string, Unix ms of the worker's last 30 s tick, `EX 120`. Written by the worker (`worker/clientState.js`),
+  read by the alerter. Missing or old = worker down or frozen.
+
+- `wa:alerts:open` also holds system alerts under fields `__system__|<kind>` (`api_down`, `redis_down`,
+  `worker_down`, `redis_memory`, `disk_full:<paths>`); `__system__` can't clash with a real clientId.
+
+- consumer group `alerters` on `wa:events:stream` — the alerter's own group, independent of `api-consumers`.
 
 ## 6) Client States
 
@@ -606,6 +719,7 @@ Broadcast model:
 
 - `DELETE /clients/:clientId`
   - queues `DELETE_CLIENT`
+  - removes the client's env label (`wa:clients:env`, `wa:clients:envMismatch`)
 
 - `GET /clients/:clientId/status`
   - returns `{ state: "<STATE>" }` if known
@@ -628,17 +742,23 @@ Broadcast model:
 - `POST /messages/send`
   - validates and enqueues outbound jobs
 
-- `GET /clients/:clientId/queue?limit=<1..200>`
+- `GET /clients/:clientId/queue?limit=<1..200>&offset=<n>`
+  - `offset` (optional, default `0`, invalid/negative treated as `0`) pages from the head of the list
+  - read-only (`LLEN` + `LRANGE`); never removes or reorders jobs
   - returns:
     - `clientId`
     - `total`
     - `returned`
     - `limit`
+    - `offset`
     - `messages`
   - each `messages[]` row includes:
-    - `index`
+    - `index` (absolute position from the head, i.e. includes `offset`)
     - `raw`
     - `parsed` or `null`
+  - send order: jobs are `LPUSH`ed and the worker `BRPOP`s the tail, so index `0` is the newest job and
+    a job's send position is `total - index` (`1` = sent next). The dashboard pages through the whole
+    queue and shows it in send order.
 
 - `DELETE /clients/:clientId/queue`
   - deletes the Redis list for that client
@@ -675,46 +795,131 @@ Broadcast model:
 - `POST /debug/test-broadcast/:clientId`
 - `GET /debug/qr/:clientId`
 - `GET /debug/pending/:clientId`
+- `GET /debug/queue-counts`
+  - `{ counts: { clientId: queueLength }, total, timestamp }` for every client in `wa:clients:state`
+  - one call for all row badges instead of one request per client
+- `GET /debug/client-envs`
+  - `{ envs: { clientId: env }, mismatches: { clientId: [env...] }, timestamp }`
 
 These endpoints are operational/debug tooling, not hardened admin APIs.
 
+### 13.6.1 Alert watch list
+
+- `GET /alerts/watched` → `{ watched: [clientId...] }` (sorted)
+- `PUT /clients/:clientId/alerts/watch` → `{ ok, clientId, watched: true }`
+- `DELETE /clients/:clientId/alerts/watch` → `{ ok, clientId, watched: false }`
+- invalid `clientId` → `400`; changes take effect on the alerter's next check (≤ 15 s)
+
+### 13.7 Client environment labels
+
+Every client gets the environment (`dev`, `test`, `uat`, `prod`) of whoever uses it. Nothing about
+sending changes; the label is recorded only.
+
+How the environment is detected (first match wins, otherwise the request is ignored):
+
+1. `X-Source` header with a backend Lambda name: `CRMDev-…`, `CRMTest-…`, `CRMUat-…`, `CRMProd-…`
+   (the CRM backend sends `os.environ["AWS_LAMBDA_FUNCTION_NAME"]`)
+2. `Origin` header matched against `ENV_ORIGINS` (browser calls from the CRM frontend / desktop app)
+
+`ENV_ORIGINS` is set on the `api` service, format `origin=env,origin=env`, e.g.
+`https://institute.reachandteach.in=prod,https://development.reachandteach.in=dev`.
+The dashboard and `localhost` are not in the list, so they never label clients.
+
+When a client is labelled:
+
+- only on successful (`< 400`) requests to: `POST /messages/send`, `POST /clients/:clientId`,
+  `POST /clients/:clientId/{reconnect,restart,stop}`, `GET|DELETE /clients/:clientId/queue`,
+  `GET /clients/:clientId/status`, and on websocket subscribe
+- first label wins (`HSETNX`); after that the API keeps the label in memory and skips Redis entirely
+- a different env later using the same client is recorded in `wa:clients:envMismatch`, not overwritten
+- tagging errors are logged and swallowed; they never affect the request
+
+Manual control (dashboard):
+
+- `PUT /clients/:clientId/env` body `{ env }` — sets the label, clears mismatches
+- `DELETE /clients/:clientId/env` — removes the label; the next labelled request sets it again
+
+Note: the in-memory cache is per API process. If Redis is wiped while the API keeps running,
+already-seen clients are not re-labelled until the API restarts.
+
 ## 14) Dashboard Behavior
 
-The React dashboard in `dashboard/src/App.jsx` is a polling admin UI with queue tools and log access.
+The React dashboard (`dashboard/src/`) is a polling admin UI with queue tools and log access.
 
-It currently supports:
+Layout:
 
-- manual API base URL entry, stored in localStorage
-- client creation
-- reconnect, restart, reset+restart
-- stop, reset+stop
-- delete
-- queue inspection for known clients
-- manual queue lookup by arbitrary `clientId`
-- queue clear by row action or manual lookup
-- send-delay view/edit
-- simple text-message enqueue form
-- overview counters:
-  - known clients
-  - active sockets
-  - websocket connections
-- log tailing for `worker`, `api`, `redis`, `dashboard`
-- per-client message log viewer:
-  - "View Logs" button on each client row loads the most recent 100 entries
-  - displayed in a "Message Logs" tab alongside the "Client Queue" tab
-  - each entry shows: status badge (sent/failed), phone number, file count, timestamp, message text, and fail reason (failed entries only)
-  - manual lookup by arbitrary `clientId` supported via the log tab input
+- top bar: API endpoint + last refresh time, Refresh, Settings
+- red banner when the API is unreachable (shows since when and how old the data is)
+- tabs: **Clients** and **Service Logs**
+
+Clients tab:
+
+- state counters (one per client state) plus total queued and live sockets; clicking a counter filters the list
+- environment filter chips (All / Dev / Test / UAT / Prod / Unknown); combine with search and state filter
+- create client
+- client rows (the primary control area):
+  - env badge (dropdown to override), mismatch warning, state, live, websocket count
+  - queue badge (`N queued`), amber at `VITE_QUEUE_WARN_AT` (default 20), red at `VITE_QUEUE_ALERT_AT` (default 100)
+  - copy client ID
+  - Queue / Logs / History
+  - only actions valid for the state: Reconnect (Disconnected, Logged Out, Stopped), Restart (always), Stop (not Stopped)
+  - `⋯` menu: Reset session + Restart, Reset session + Stop (both confirm first), Delete
+- every action reports success or the API's error text as a toast
+
+Windows:
+
+- Queue: loads the whole queue 200 at a time with progress, shown in send order (`#1` = sent next); Stop / Refresh / Clear;
+  Export JSON/CSV of the loaded messages (JSON records whether the export is complete)
+- Message Logs: newest 100, All / Sent / Failed filter, failed count, "Load more" via the `before` cursor;
+  Export JSON/CSV fetches all remaining pages first and applies the current status filter
+- Queue, Message Logs and History each have a search box (phone digits or message text); exports apply
+  the current search/status filters. Phones are displayed as `+91 98765 43210`.
+- CSV exports are UTF-8 with BOM (opens correctly in Excel) and escape cells starting with `= + - @`
+  so message text can't run as a spreadsheet formula
+- History: date range plus Today / 7 days / 30 days presets, Export JSON, Delete File
+- Settings: dashboard options (on/off switches, per browser), API endpoint (validated, stored in localStorage),
+  send delay (min ≤ max and range checked)
+- Link phone (QR): "Show QR" on rows in `QR_REQUIRED` (hidden when Settings → "Show QR button" is off).
+  The window subscribes to the API websocket (`/ws`) for that client, renders each new QR as WhatsApp rotates it,
+  and shows "Linked" once the client reports `CONNECTED`. No extra API endpoint; QR images are drawn in the
+  browser with the `qrcode` package.
+
+Dashboard options (Settings → Dashboard options) are defined in `DASHBOARD_OPTIONS` in
+`dashboard/src/config.js` and saved per browser (`localStorage` key `dashboardOptions`). To add one, add an
+entry there and read `options.<key>` where it is used.
+
+Service Logs tab:
+
+- container logs from the dashboard server (`/api/logs`), service list from `/api/logs/services`
+  (`DASH_LOG_SERVICES`, default `worker,api,redis,dashboard`), line count, text filter (e.g. a client ID), auto-refresh
+- in `npm run dev`, vite proxies `/api` to `DASHBOARD_SERVER_URL` (default `http://localhost:8080`), so the
+  dashboard container (or `npm start`) must be running
+
+Compatibility with older APIs:
+
+- if `/debug/queue-counts` or `/debug/client-envs` return `404`, that feature is switched off for the
+  current endpoint (no badges / env controls disabled) instead of erroring on every refresh
+- if the queue endpoint ignores `offset`, the Queue window shows the first page and says so
+
+Configuration (`dashboard/src/config.js`, build-time `VITE_*` variables):
+
+- `VITE_API_BASE` (default `http://localhost:3000`), `VITE_DASHBOARD_SERVER_BASE` (default same origin)
+- `VITE_REFRESH_INTERVAL_MS` (default `5000`), `VITE_TOAST_DURATION_MS`, `VITE_SERVICE_LOG_REFRESH_MS`
+- `VITE_QUEUE_WARN_AT`, `VITE_QUEUE_ALERT_AT`
 
 Polling behavior:
 
-- refreshes debug data every 5 seconds
+- refreshes client states, active sockets, websocket stats, queue counts and env labels every
+  `VITE_REFRESH_INTERVAL_MS`; a refresh is skipped while the previous one is still running
+- polling (and Service Logs auto-refresh) pauses while the browser tab is hidden and refreshes
+  immediately when the tab is shown again
 
 Operational UX contract already assumed in the repo:
 
 - client row is the primary control area
 - no duplicate bottom action block
-- queue panel supports arbitrary `clientId` lookup, even for clients not created yet
-- message log panel supports arbitrary `clientId` lookup, even for clients not currently active
+- queue, logs and history open from the client row (the arbitrary-`clientId` lookup box was removed;
+  for a client that isn't listed, call the API directly, e.g. `GET /clients/<id>/queue`)
 
 ## 15) Docker Compose Defaults
 
@@ -757,11 +962,18 @@ Current compose environment highlights:
 - api:
   - `LOG_LEVEL`
   - `API_LOG_LEVEL`
+  - `ENV_ORIGINS` (frontend origin → environment map, see 13.7; overridable from `.env`)
 
 - dashboard:
   - `DASH_USER`
   - `DASH_PASS`
   - `DASH_PORT`
+  - `DASH_LOG_SERVICES` (optional; services shown in Service Logs, default `worker,api,redis,dashboard`)
+
+- alerter:
+  - `GOOGLE_CHAT_WEBHOOK_URL` (secret, from `.env`; empty = dry run), `ALERT_*` settings (see 4.5)
+  - read-only mounts `./sessions:/mnt/sessions:ro`, `./logs:/mnt/logs:ro` (disk-space check only)
+  - memory limit 96 MB (uses ~20 MB), `restart: unless-stopped`
 
 ## 16) TLS / Proxy Setup
 
@@ -790,16 +1002,25 @@ Current automated tests live in:
 - `api/tests/clients.routes.test.js`
 - `api/tests/messages.routes.test.js`
 - `api/tests/messageLogs.routes.test.js`
+- `api/tests/debug.routes.test.js`
+- `api/tests/envTagger.test.js`
+- `api/tests/ws.routes.test.js`
 - `api/tests/streamConsumer.test.js`
 - `worker/tests/socketManager.test.js`
 - `worker/tests/startupRehydrate.test.js`
+- `api/tests/alerts.routes.test.js`
+- `alerter/tests/rules.test.js`, `alerter/tests/alerter.test.js`, `alerter/tests/googleChat.test.js`
 
 What is covered today:
 
 - send-delay defaults, normalization, and validation
 - client creation and duplicate handling
 - reconnect state gatekeeping
-- queue inspection and clearing endpoints
+- queue inspection and clearing endpoints, including `offset` paging and invalid/past-end offsets
+- queue counts for all clients in one call
+- environment labels: `X-Source` / `Origin` detection, label-once, in-memory skip, mismatch recording,
+  ignored dashboard/localhost/unknown callers, Redis errors swallowed, allowed-routes-only hook,
+  manual set/clear routes, label cleared on client delete, websocket subscribe tagging
 - message enqueue validation
 - stream message validation, ack, and DLQ handling
 - disconnect handling for `401`, `405`, `408`, `428`, ordinary disconnect retries, retry-cap session persistence, and sender-loop requeue behavior
@@ -809,6 +1030,16 @@ What is covered today:
 - message log write on send failure with `failReason`
 - message log errors do not block delivery or requeue
 - message log API: empty client, newest-first ordering, default/min/max limit, total vs returned, `before` cursor pagination, failed entry with `failReason`, sent entry without `failReason`, malformed entry handling, full field shape
+- persistent history returns empty (not 500) for a client with no log file
+- alert watch list routes; watch removed on client delete
+- alerter: grace periods, immediate logout (incl. via event while state is already `QR_REQUIRED`), stale events
+  ignored, thread updates on worsening, no duplicate/false recovery after restart, batching, retry when Google
+  Chat rejects, stop/unwatch closing, queue-stuck and send-failure alerts, daily OK once per day, message framing;
+  Google Chat sender threading, retries/backoff, no URL in logs, rate spacing, dry run
+- alerter system checks: API/Redis down after grace and recovery, client checks paused while Redis is down,
+  worker heartbeat (startup grace, stale, missing, recovery), no false recovery after restart, Redis memory and
+  disk thresholds with hysteresis, one alert per disk, stale disk alerts dropped, dead-letter growth notices
+  with cooldown, system alerts in the daily message
 
 How to run tests:
 
@@ -818,6 +1049,10 @@ cd api && npm test
 
 ```bash
 cd worker && npm test
+```
+
+```bash
+cd alerter && npm test
 ```
 
 ## 18) Files To Read Before Changing Behavior

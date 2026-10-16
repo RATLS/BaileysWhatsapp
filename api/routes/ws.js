@@ -46,6 +46,7 @@ module.exports = async function (fastify) {
         if (subscriptionChanged) {
           register(clientId, socket)
           subscribedClientId = clientId
+          await fastify.envTagger.tagFromHeaders(clientId, req.headers)
         }
 
         if (subscriptionChanged) {
