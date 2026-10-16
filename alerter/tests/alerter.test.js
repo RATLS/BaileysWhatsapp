@@ -434,6 +434,106 @@ test("system alerts appear in the daily message and are not closed by watch-list
   assert.ok(redis.open()["__system__|worker_down"], "still open")
 })
 
+test("worker message after the heartbeat key expired uses the last beat seen, not 'never reported'", async () => {
+  const { redis, sent, alerter, at } = setup()
+  redis.sys.heartbeat = 5 * MIN
+  at(5 * MIN); await alerter.tick() // beat seen and fresh
+  redis.sys.heartbeat = null // key expired: worker silent for > 2 min
+  at(8 * MIN); await alerter.tick()
+  assert.match(sent[0].text, /🔴 \*Worker\* has stopped reporting — last sign of life 3 min ago/)
+  redis.sys.heartbeat = "fresh"
+  at(9 * MIN); await alerter.tick()
+  assert.match(sent[1].text, /✅ \*Worker\* is reporting again \(was silent 4 min\)/)
+})
+
+test("after the machine was paused (e.g. laptop sleep), new system alerts wait for the grace period", async () => {
+  const { redis, sent, alerter, at } = setup({ cfg: { resumeGraceMs: MIN } })
+  redis.sys.heartbeat = 0
+  at(0); await alerter.tick()
+  // 16 minutes frozen: the heartbeat key expired meanwhile.
+  redis.sys.heartbeat = null
+  at(16 * MIN); await alerter.tick()
+  assert.equal(sent.length, 0, "held right after resume")
+  // Worker reports again within the grace window: no alert at all.
+  redis.sys.heartbeat = "fresh"
+  at(16 * MIN + 30_000); await alerter.tick()
+  at(17 * MIN + 15_000); await alerter.tick()
+  assert.equal(sent.length, 0)
+})
+
+test("a worker that is really down still alerts once the post-pause grace is over", async () => {
+  const { redis, sent, alerter, at } = setup({ cfg: { resumeGraceMs: MIN } })
+  redis.sys.heartbeat = 0
+  at(0); await alerter.tick()
+  redis.sys.heartbeat = null
+  at(16 * MIN); await alerter.tick()
+  at(16 * MIN + 15_000); await alerter.tick()
+  assert.equal(sent.length, 0)
+  at(17 * MIN + 15_000); await alerter.tick()
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].text, /🔴 \*Worker\* has stopped reporting/)
+})
+
+test("start() does not wait for Redis: it announces itself and reports Redis down", async () => {
+  const clockRef = { now: 0 }
+  const redis = createFakeRedis(clockRef)
+  redis.sys.up = false
+  // Like ioredis while Redis is unreachable: commands just hang.
+  for (const name of ["ping", "smembers", "hgetall", "get", "info", "xlen", "hset", "hdel"]) {
+    redis[name] = () => new Promise(() => {})
+  }
+  const sent = []
+  const sender = { async send(msg) { sent.push(msg); return true } }
+  const streamRedis = { xgroup: () => new Promise(() => {}) } // never resolves while Redis is down
+  const alerter = new Alerter({
+    redis, streamRedis, sender, log: { info() {}, warn() {}, error() {} },
+    cfg: baseCfg({ probeTimeoutMs: 20, tickMs: 60_000 }), now: () => clockRef.now,
+  })
+
+  await alerter.start()
+  assert.match(sent[0].text, /🟢 Alerter started — Redis is not reachable yet/)
+
+  clockRef.now = MIN
+  await alerter.tick() // would never finish if saving the alert waited for Redis
+  assert.match(sent[1].text, /🔴 \*Redis\* is unreachable for 1 min/)
+
+  clockRef.now = MIN + 15_000
+  await alerter.tick()
+  alerter.stop()
+  assert.equal(sent.length, 2, "checks keep running, and the alert is not repeated")
+})
+
+test("restarting while Redis is down does not repeat an already-open disk alert", async () => {
+  const full = { bsize: 1024, blocks: 1000, bavail: 50 }
+  const disk = { "/mnt/sessions": full, "/mnt/logs": full }
+  const { redis, sent, restart, at } = setup({ cfg: { diskPaths: ["/mnt/sessions", "/mnt/logs"] }, disk })
+  await redis.hset("wa:alerts:open", "__system__|disk_full:/mnt/sessions,/mnt/logs", JSON.stringify({
+    system: true, clientId: "__system__", kind: "disk_full:/mnt/sessions,/mnt/logs", reason: "disk_full",
+    path: "/mnt/sessions, /mnt/logs", since: 0,
+  }))
+
+  redis.sys.up = false
+  const fresh = restart() // open alerts can't be loaded yet
+  at(0); await fresh.tick()
+  at(15_000); await fresh.tick()
+  assert.equal(sent.length, 0, "disk alert held: it may already be open")
+
+  redis.sys.up = true
+  at(30_000); await fresh.tick()
+  assert.equal(sent.length, 0, "loaded from Redis: already open, so not posted again")
+})
+
+test("a slow check is not mistaken for a pause while the clock watcher keeps ticking", async () => {
+  const { alerter } = setup()
+  alerter.detectPause(0)
+  // A check is stuck for 70 s, but the 5-second clock watcher keeps running.
+  for (let t = 5_000; t <= 70_000; t += 5_000) alerter.detectPause(t)
+  assert.equal(alerter.resumedAt, null)
+  // A real freeze stops the watcher too: a 16-minute jump is a pause.
+  alerter.detectPause(70_000 + 16 * MIN)
+  assert.equal(alerter.resumedAt, 70_000 + 16 * MIN)
+})
+
 test("started message lists watched clients", async () => {
   const { redis, sent, alerter } = setup()
   redis.watch("B", "A")

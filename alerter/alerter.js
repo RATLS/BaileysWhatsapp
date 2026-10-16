@@ -20,6 +20,7 @@ function withTimeout(promise, ms) {
   ]).finally(() => clearTimeout(timer))
 }
 
+const CLOCK_WATCH_MS = 5_000
 const openField = (clientId, kind) => `${clientId}|${kind}`
 const threadKeyFor = (clientId, kind, at) => `${clientId}-${kind}-${at}`
 
@@ -62,6 +63,12 @@ class Alerter {
     this.systemTracks = {} // { redis, api } -> { failingSince }
     this.systemOpen = new Map() // kind -> open system alert
     this.dlqNoticeAt = null
+    this.lastSeenBeat = null
+    // Open system alerts from before a restart are only known once they could
+    // be read from Redis; until then only "Redis down" may open (see setSystemAlert).
+    this.systemStateLoaded = false
+    this.lastTickAt = null
+    this.resumedAt = null
     this.startedAt = now()
     this.ticking = false
     this.stopped = false
@@ -92,18 +99,24 @@ class Alerter {
       const alert = safeJson(value)
       if (alert && alert.clientId === keys.SYSTEM_ID && alert.kind) this.systemOpen.set(alert.kind, alert)
     }
+    this.systemStateLoaded = true
   }
 
-  // Best effort: Redis itself may be the thing that is down.
+  // Best effort and time-limited: Redis itself may be the thing that is down,
+  // and a command to an unreachable Redis waits instead of failing. Without the
+  // limit, one save would freeze every other check until Redis came back.
   async persistSystem(alert) {
     try {
-      await this.redis.hset(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind), JSON.stringify(alert))
+      await withTimeout(
+        this.redis.hset(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind), JSON.stringify(alert)),
+        this.cfg.probeTimeoutMs
+      )
     } catch {}
   }
 
   async unpersistSystem(alert) {
     try {
-      await this.redis.hdel(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind))
+      await withTimeout(this.redis.hdel(keys.OPEN_KEY, openField(keys.SYSTEM_ID, alert.kind)), this.cfg.probeTimeoutMs)
     } catch {}
   }
 
@@ -126,6 +139,7 @@ class Alerter {
     this.ticking = true
     try {
       const now = this.now()
+      this.detectPause(now)
       const redisOk = await this.runSystemChecks(now)
       // Client checks need Redis; while it's down only the Redis alert applies.
       if (redisOk) await this.runChecks(now)
@@ -137,6 +151,27 @@ class Alerter {
   }
 
   // ── System checks (always on) ─────────────────────────────────────────
+
+  // A big jump in the clock between two observations means the whole machine
+  // was frozen (laptop sleep, VM pause). Heartbeats expired meanwhile through no
+  // fault of the services, so restart the failure clocks and hold new system
+  // alerts. Called from every check and from a small clock timer (see start()),
+  // so a slow check alone never looks like a pause.
+  detectPause(now) {
+    const pauseThreshold = this.cfg.tickMs * 4
+    if (this.lastTickAt !== null && now - this.lastTickAt > pauseThreshold) {
+      this.resumedAt = now
+      this.systemTracks = {}
+      this.log.info(
+        `Resumed after a ${messages.formatDuration(now - this.lastTickAt)} pause — holding new system alerts for ${messages.formatDuration(this.cfg.resumeGraceMs)}`
+      )
+    }
+    this.lastTickAt = now
+  }
+
+  holdingSystemAlerts(now) {
+    return this.resumedAt !== null && now - this.resumedAt < this.cfg.resumeGraceMs
+  }
 
   async probeRedis() {
     try {
@@ -169,6 +204,10 @@ class Alerter {
   async setSystemAlert(kind, problem, healthy, now) {
     const open = this.systemOpen.get(kind)
     const ctx = this.ctx(now)
+    if (problem && !open && this.holdingSystemAlerts(now)) return
+    // Might already be open from before a restart: wait until that's known,
+    // otherwise e.g. "disk nearly full" is posted again on every restart.
+    if (problem && !open && !this.systemStateLoaded && kind !== "redis_down") return
     if (problem && !open) {
       const alert = {
         system: true,
@@ -200,6 +239,9 @@ class Alerter {
     const { cfg } = this
 
     const redisOk = await this.probeRedis()
+    if (redisOk && !this.systemStateLoaded) {
+      await withTimeout(this.loadSystemOpen(), cfg.probeTimeoutMs).catch(() => {})
+    }
     const redisState = evaluateDown(this.downTrack("redis", "redis_down"), redisOk, now, cfg.systemGraceMs)
     this.systemTracks.redis = redisState.track
     await this.setSystemAlert("redis_down", redisState.problem, redisOk, now)
@@ -259,9 +301,13 @@ class Alerter {
 
   async checkWorker(now) {
     const raw = await this.redis.get(keys.WORKER_HEARTBEAT_KEY)
-    const lastBeat = raw === null || raw === undefined ? null : Number(raw)
+    const current = raw === null || raw === undefined ? null : Number(raw)
+    if (Number.isFinite(current)) this.lastSeenBeat = current
+    // The key expires 2 min after the last beat; if it's gone, fall back to the
+    // last beat we saw so the message says "last seen at …", not "never".
+    const lastBeat = Number.isFinite(current) ? current : this.lastSeenBeat
     const problem = evaluateHeartbeat(lastBeat, now, this.cfg.workerStaleMs, this.startedAt)
-    const healthy = Number.isFinite(lastBeat) && now - lastBeat <= this.cfg.workerStaleMs
+    const healthy = Number.isFinite(current) && now - current <= this.cfg.workerStaleMs
     await this.setSystemAlert("worker_down", problem, healthy, now)
   }
 
@@ -417,14 +463,19 @@ class Alerter {
   async sendStarted() {
     let watched = []
     let openCount = this.systemOpen.size
+    let redisReachable = true
     try {
-      const [list, open] = await Promise.all([this.redis.smembers(keys.WATCHED_KEY), this.loadOpen()])
+      const [list, open] = await withTimeout(
+        Promise.all([this.redis.smembers(keys.WATCHED_KEY), this.loadOpen()]),
+        this.cfg.probeTimeoutMs
+      )
       watched = (list || []).sort()
       openCount += open.size
     } catch (err) {
+      redisReachable = false
       this.log.warn(`Could not read watch list at start: ${err.message}`)
     }
-    await this.sender.send({ text: messages.startedMessage({ watched, openCount }, this.cfg) })
+    await this.sender.send({ text: messages.startedMessage({ watched, openCount, redisReachable }, this.cfg) })
   }
 
   // ── Event stream (only used to catch logouts, which are short-lived) ──
@@ -473,9 +524,16 @@ class Alerter {
     return ids.length
   }
 
+  // Runs in the background. Creating the consumer group waits for Redis
+  // (this connection never gives up), which is why it lives here and not in start().
   async runEventLoop() {
+    let groupReady = false
     while (!this.stopped) {
       try {
+        if (!groupReady) {
+          await this.ensureGroup()
+          groupReady = true
+        }
         await this.readEventsOnce()
       } catch (err) {
         if (this.stopped) break
@@ -485,7 +543,7 @@ class Alerter {
           this.log.warn(`Event stream read failed: ${message}`)
           this.lastStreamWarnAt = Date.now()
         }
-        if (message.includes("NOGROUP")) await this.ensureGroup().catch(() => {})
+        if (message.includes("NOGROUP")) groupReady = false // group was removed: recreate it
         await new Promise((r) => setTimeout(r, 2000))
       }
     }
@@ -497,17 +555,21 @@ class Alerter {
   // could never be sent; anything that needs Redis is retried later.
   async start() {
     this.startedAt = this.now()
-    await this.ensureGroup().catch((err) => this.log.warn(`Consumer group not ready yet: ${err.message}`))
-    await this.loadSystemOpen().catch(() => {})
+    this.runEventLoop()
+    await withTimeout(this.loadSystemOpen(), this.cfg.probeTimeoutMs)
+      .catch((err) => this.log.warn(`Could not load open system alerts yet: ${err.message}`))
+    // Clock watcher: keeps working while a check awaits a slow Redis, and only
+    // stops when the whole process is frozen — which is exactly what it detects.
+    this.clockTimer = setInterval(() => this.detectPause(this.now()), CLOCK_WATCH_MS)
     await this.sendStarted()
     await this.tick()
     this.timer = setInterval(() => this.tick(), this.cfg.tickMs)
-    this.runEventLoop()
   }
 
   stop() {
     this.stopped = true
     if (this.timer) clearInterval(this.timer)
+    if (this.clockTimer) clearInterval(this.clockTimer)
   }
 }
 

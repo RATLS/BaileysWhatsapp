@@ -149,7 +149,10 @@ function combined(title, lines, cfg) {
   return withFrame(`${title}\n${lines.map((l) => `• ${l}`).join("\n")}`, cfg)
 }
 
-function startedMessage({ watched, openCount }, cfg) {
+function startedMessage({ watched, openCount, redisReachable = true }, cfg) {
+  if (!redisReachable) {
+    return withFrame("🟢 Alerter started — Redis is not reachable yet, so the watch list is unknown (system checks are running)", cfg)
+  }
   const list = watched.length ? `: ${watched.join(", ")}` : ""
   const open = openCount ? ` · ${openCount} alert(s) still open` : ""
   return withFrame(`🟢 Alerter started — watching ${watched.length} client(s)${list}${open}`, cfg)

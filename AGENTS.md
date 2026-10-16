@@ -165,7 +165,9 @@ Must remain true unless explicitly approved otherwise:
 - Must stay read-only towards keys owned by the worker/API (state, queues, msglog, env, heartbeat). It writes only
   `wa:alerts:open`, `wa:alerts:dailyOkDate`, `wa:alerts:dlqSeen` and its own consumer group `alerters`.
 - System alerts (API, Redis, worker heartbeat, Redis memory, disk, dead-letter growth) are always on; they close
-  only on positive proof of health. The alerter must start and alert even when Redis is down.
+  only on positive proof of health. The alerter must start and alert even when Redis is down: no start-up step may
+  wait on Redis, and Redis writes from system-alert handling must be time-limited.
+- After a detected machine pause (clock watcher), new system alerts are held for `ALERT_RESUME_GRACE_MS`.
 - No Docker socket in the alerter (deliberate); disk is measured through read-only mounts only.
 - The worker's `wa:health:worker` write (in its existing 30 s tick) must never throw or block the worker.
 - Its consumer group is independent of `api-consumers`; it must never ack or claim for other groups.

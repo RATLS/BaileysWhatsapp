@@ -47,7 +47,11 @@ function createGoogleChatSender({
           body: JSON.stringify(body),
         })
         status = res.status
-        if (res.ok) return true
+        if (res.ok) {
+          // Message text only (never the webhook URL), so logs show what was posted.
+          log.info(`Google Chat: sent "${text.length > 120 ? `${text.slice(0, 119)}…` : text}"`)
+          return true
+        }
       } catch (err) {
         log.warn(`Google Chat send failed (network): ${err && err.message ? err.message : err}`)
       }

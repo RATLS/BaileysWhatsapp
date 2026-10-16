@@ -59,6 +59,9 @@ function loadConfig() {
     dlqStream: process.env.WA_EVENTS_DLQ_STREAM || "wa:events:dlq",
     // At most one "broken events" notice per this period.
     dlqCooldownMs: positiveNumber("ALERT_DLQ_COOLDOWN_MS", 30 * 60_000),
+    // If a check runs much later than tickMs, everything was paused (laptop
+    // sleep, VM pause): hold new system alerts this long so services can catch up.
+    resumeGraceMs: positiveNumber("ALERT_RESUME_GRACE_MS", 60_000),
   }
 }
 

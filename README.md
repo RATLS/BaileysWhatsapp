@@ -235,7 +235,18 @@ System alerts (always on, not tied to the watch list; open → "✅" recovery li
 | broken events | `XLEN wa:events:dlq` grew since last seen (`wa:alerts:dlqSeen`) | one notice, at most every 30 min |
 
 A system alert only closes on positive proof (the API answering, a fresh heartbeat, a lower reading), so an
-alerter restart or a partial outage can never fake a recovery. The alerter starts and alerts even if Redis is down.
+alerter restart or a partial outage can never fake a recovery. The alerter starts and alerts even if Redis is down:
+nothing at start-up waits for Redis (reads time out after `ALERT_PROBE_TIMEOUT_MS`, the event-stream reader
+connects in the background), and saving an alert to an unreachable Redis is time-limited so other checks keep running.
+Until the open system alerts from before a restart have been read from Redis, only "Redis down" can open, so a
+restart during a Redis outage doesn't repeat alerts (e.g. disk) that were already open.
+
+Pause handling: a 5 s clock watcher detects when the whole machine was frozen (laptop sleep, VM pause). After such a
+pause, failure clocks restart and new system alerts are held for `ALERT_RESUME_GRACE_MS` (default 60 s) so services
+can report in again; recoveries are still sent. A slow check alone never counts as a pause. If the worker's heartbeat
+key has expired, the message uses the last beat the alerter saw ("last sign of life … ago").
+
+Every message actually delivered to Google Chat is logged as `Google Chat: sent "…"` (text only, never the URL).
 It has no Docker socket access, so container restart counts and the dashboard container are not monitored;
 a crash-looping API or worker still shows up through its failing health check / heartbeat.
 
