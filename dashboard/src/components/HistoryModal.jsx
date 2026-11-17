@@ -4,6 +4,7 @@ import LogEntry from "./LogEntry.jsx"
 import Icon from "./Icon.jsx"
 import ActionMenu from "./ActionMenu.jsx"
 import SearchInput from "./SearchInput.jsx"
+import StatusFilter from "./StatusFilter.jsx"
 import { clientPath } from "../api.js"
 import { HISTORY_LIMIT, HISTORY_PRESETS } from "../config.js"
 import { daysAgo, downloadCsv, downloadJson, formatCount, localDateString, matchesSearch } from "../utils.js"
@@ -12,25 +13,52 @@ import { LOG_CSV_COLUMNS, toLogExportRow } from "../exportColumns.js"
 export default function HistoryModal({ api, clientId, onClose, notify }) {
   const [range, setRange] = useState(() => ({ from: localDateString(), to: localDateString() }))
   const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState("all")
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const runRef = useRef(0)
+
+  function fetchPage({ from, to }, before) {
+    const params = new URLSearchParams({ from, to, limit: String(HISTORY_LIMIT) })
+    if (before) params.set("before", String(before))
+    return api.get(`${clientPath(clientId, "/logs/persistent")}?${params}`)
+  }
 
   const load = useCallback(async ({ from, to }) => {
     const runId = ++runRef.current
     setLoading(true)
     setError("")
     try {
-      const params = new URLSearchParams({ from, to, limit: String(HISTORY_LIMIT) })
-      const res = await api.get(`${clientPath(clientId, "/logs/persistent")}?${params}`)
-      if (runRef.current === runId) setData(res)
+      const res = await fetchPage({ from, to })
+      if (runRef.current === runId) setData({ ...res, range: { from, to } })
     } catch (err) {
       if (runRef.current === runId) setError(`Failed to load history: ${err.message}`)
     } finally {
       if (runRef.current === runId) setLoading(false)
     }
   }, [api, clientId])
+
+  async function loadAll() {
+    const runId = ++runRef.current
+    setLoading(true)
+    setError("")
+    try {
+      let entries = data.entries
+      while (entries.length < data.total) {
+        const before = entries[entries.length - 1].sentAt
+        const res = await fetchPage(data.range, before)
+        if (runRef.current !== runId) return
+        if (!res.entries.length || res.entries[0].sentAt >= before) break
+        entries = entries.concat(res.entries)
+        setData({ ...data, entries, returned: entries.length })
+      }
+    } catch (err) {
+      if (runRef.current === runId) setError(`Failed to load history: ${err.message}`)
+    } finally {
+      if (runRef.current === runId) setLoading(false)
+    }
+  }
 
   // Initial load only; later loads are explicit (Load button / presets),
   // so editing a date doesn't fire a request per keystroke.
@@ -49,7 +77,7 @@ export default function HistoryModal({ api, clientId, onClose, notify }) {
   // JSON keeps the original shape (`entries`, `sentAtFormatted`) for existing consumers.
   function exportHistory(format) {
     if (!visible.length) return
-    const base = `${clientId}-history_${range.from}_to_${range.to}${searchTerm ? "-search" : ""}`
+    const base = `${clientId}-history_${range.from}_to_${range.to}${statusFilter === "all" ? "" : `-${statusFilter}`}${searchTerm ? "-search" : ""}`
     if (format === "csv") {
       downloadCsv(`${base}.csv`, LOG_CSV_COLUMNS, visible.map(toLogExportRow))
     } else {
@@ -59,6 +87,7 @@ export default function HistoryModal({ api, clientId, onClose, notify }) {
         to: range.to,
         total: data.total,
         returned: data.returned,
+        statusFilter,
         search: searchTerm || null,
         exported: visible.length,
         exportedAt: new Date().toISOString(),
@@ -83,15 +112,19 @@ export default function HistoryModal({ api, clientId, onClose, notify }) {
   }
 
   const searchTerm = search.trim()
+  const isFiltered = statusFilter !== "all" || Boolean(searchTerm)
   const entries = data?.entries || []
-  const visible = searchTerm
-    ? entries.filter((e) => matchesSearch(search, { phone: e.phoneNumber, text: e.text }))
+  const failedCount = entries.filter((e) => e.status === "failed").length
+  const visible = isFiltered
+    ? entries.filter((e) =>
+        (statusFilter === "all" || e.status === statusFilter) &&
+        matchesSearch(search, { phone: e.phoneNumber, text: e.text }))
     : entries
 
   const subtitle = loading
     ? "Loading…"
     : data
-      ? searchTerm
+      ? isFiltered
         ? `${formatCount(visible.length)} match · ${formatCount(data.returned)} loaded`
         : `${formatCount(data.total)} in range · showing ${formatCount(data.returned)}`
       : undefined
@@ -126,8 +159,9 @@ export default function HistoryModal({ api, clientId, onClose, notify }) {
           <button className="btn-secondary" onClick={() => load(range)} disabled={loading}>
             <Icon name="refresh" /> {loading ? "Loading…" : "Load"}
           </button>
+          <StatusFilter value={statusFilter} onChange={setStatusFilter} failedCount={failedCount} />
           <ActionMenu
-            label={`Export ${searchTerm ? "matching" : "loaded"} entries`}
+            label={`Export ${isFiltered ? "matching" : "loaded"} entries`}
             triggerLabel="Export"
             triggerIcon="download"
             align="left"
@@ -150,15 +184,18 @@ export default function HistoryModal({ api, clientId, onClose, notify }) {
       {error && <div className="error-text">{error}</div>}
       {data && data.total > data.returned && (
         <div className="info-text">
-          Showing the newest {formatCount(HISTORY_LIMIT)} of {formatCount(data.total)} — narrow the date range to see older ones.
+          {loading ? "Loading" : "Showing the newest"} {formatCount(data.returned)} of {formatCount(data.total)}
+          {!loading && <button className="btn-secondary" onClick={loadAll}>Load all</button>}
         </div>
       )}
       <div className="modal-list">
         {!loading && data && entries.length === 0 && (
           <div className="empty-state">No entries in this date range.</div>
         )}
-        {searchTerm && entries.length > 0 && visible.length === 0 && (
-          <div className="empty-state">No loaded entries match "{searchTerm}".</div>
+        {isFiltered && entries.length > 0 && visible.length === 0 && (
+          <div className="empty-state">
+            No loaded entries match{searchTerm ? ` "${searchTerm}"` : ""}{statusFilter !== "all" ? ` (${statusFilter})` : ""}.
+          </div>
         )}
         {visible.map((entry, i) => (
           <LogEntry key={`${entry.sentAt ?? "x"}-${i}`} entry={entry} />
