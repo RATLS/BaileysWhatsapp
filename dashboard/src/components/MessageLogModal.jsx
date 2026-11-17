@@ -4,16 +4,11 @@ import LogEntry from "./LogEntry.jsx"
 import Icon from "./Icon.jsx"
 import ActionMenu from "./ActionMenu.jsx"
 import SearchInput from "./SearchInput.jsx"
+import StatusFilter from "./StatusFilter.jsx"
 import { clientPath } from "../api.js"
 import { MSG_LOG_PAGE_SIZE } from "../config.js"
 import { downloadCsv, downloadJson, fileTimestamp, formatCount, matchesSearch } from "../utils.js"
 import { LOG_CSV_COLUMNS, toLogExportRow } from "../exportColumns.js"
-
-const STATUS_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "sent", label: "Sent" },
-  { key: "failed", label: "Failed" },
-]
 
 function cursorOf(entries) {
   const last = [...entries].reverse().find((e) => typeof e.sentAt === "number")
@@ -159,18 +154,7 @@ export default function MessageLogModal({ api, clientId, onClose, notify }) {
         <button className="btn-secondary" onClick={loadFirst} disabled={loading}>
           <Icon name="refresh" /> {loading ? "Loading…" : "Refresh"}
         </button>
-        <div className="segmented" role="group" aria-label="Filter by status">
-          {STATUS_FILTERS.map((f) => (
-            <button
-              key={f.key}
-              className={`segmented-btn${statusFilter === f.key ? " segmented-btn-active" : ""}`}
-              onClick={() => setStatusFilter(f.key)}
-            >
-              {f.label}
-              {f.key === "failed" && failedCount > 0 && <span className="count-pill count-pill-red">{failedCount}</span>}
-            </button>
-          ))}
-        </div>
+        <StatusFilter value={statusFilter} onChange={setStatusFilter} failedCount={failedCount} />
         <ActionMenu
           label={`Export all ${isFiltered ? "matching " : ""}entries (not just the loaded ones)`}
           triggerLabel={exporting ? "Exporting…" : "Export"}

@@ -275,6 +275,8 @@ module.exports = async function (fastify) {
 
     const fromMs = from ? new Date(from + "T00:00:00.000Z").getTime() : 0
     const toMs = to ? new Date(to + "T23:59:59.999Z").getTime() : Infinity
+    const before = Number(req.query && req.query.before)
+    const maxMs = Number.isFinite(before) && before > 0 ? Math.min(toMs, before - 1) : toMs
 
     const filePath = path.join(MSGLOGS_DIR, `${clientId}.jsonl`)
     const empty = { clientId, total: 0, returned: 0, entries: [] }
@@ -302,7 +304,7 @@ module.exports = async function (fastify) {
         if (!line.trim()) return
         try {
           const entry = JSON.parse(line)
-          if (entry.sentAt >= fromMs && entry.sentAt <= toMs) {
+          if (entry.sentAt >= fromMs && entry.sentAt <= maxMs) {
             entries.push(entry)
           }
         } catch {
